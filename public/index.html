@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="cs">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Tréninkový deník</title>
+<meta name="theme-color" content="#15171C">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="Deník">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icons/icon-180.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<div id="login" hidden>
+  <form id="loginForm" autocomplete="on">
+    <h1>Tréninkový deník</h1>
+    <p>Soukromý deník. Zadej heslo.</p>
+    <input type="password" id="pw" name="password" placeholder="Heslo" autocomplete="current-password" required autofocus>
+    <p class="err" id="loginErr"></p>
+    <button class="bigbtn" type="submit" id="loginBtn">Přihlásit</button>
+  </form>
+</div>
+
+<div id="app" hidden>
+<header>
+  <div class="wrap">
+    <div class="hd">
+      <div class="stamp" id="dayStamp">A</div>
+      <h1 id="dayTitle">Trénink</h1>
+      <div class="meta"><span id="wkCount">týden 1</span><br><span id="sesCount">0 tréninků</span></div>
+    </div>
+    <nav role="tablist">
+      <button role="tab" data-view="train" aria-selected="true">Trénink</button>
+      <button role="tab" data-view="history" aria-selected="false">Historie</button>
+      <button role="tab" data-view="stats" aria-selected="false">Progres</button>
+      <button role="tab" data-view="plan" aria-selected="false">Plán</button>
+      <button role="tab" data-view="data" aria-selected="false">Data</button>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <section id="view-train"></section>
+  <section id="view-history" hidden></section>
+  <section id="view-stats" hidden></section>
+  <section id="view-plan" hidden></section>
+  <section id="view-data" hidden></section>
+</main>
+
+<div id="restbar"><div id="restfill"></div><div class="rb">
+  <div><small>Pauza</small><span id="restnum">2:00</span></div>
+  <button id="restAdd">+30 s</button>
+  <button id="restSkip">Hotovo</button>
+</div></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>
