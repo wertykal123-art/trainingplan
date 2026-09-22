@@ -1,7 +1,7 @@
 import express from "express";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { migrate, loadState, saveState, loadSessions, pool } from "./db.js";
+import { migrate, loadState, saveState, loadSessions, applyPlan, pool } from "./db.js";
 import { checkPassword, setSessionCookie, clearSessionCookie, isAuthed, requireAuth, loginAllowed, recordFailedLogin, clearFailedLogins } from "./auth.js";
 import { toCSV, toDigest, toJSON } from "./export.js";
 
@@ -47,6 +47,16 @@ async function putState(req, res, next) {
 app.put("/api/state", requireAuth, putState);
 app.post("/api/state", requireAuth, putState); // navigator.sendBeacon umí jen POST
 
+/* ---------- plán ---------- */
+app.post("/api/plan", requireAuth, async (req, res, next) => {
+  try {
+    const body = req.body && req.body.plan !== undefined ? req.body.plan : req.body;
+    const r = await applyPlan(body);
+    if (!r.ok) return res.status(400).json({ error: "Plán neprošel kontrolou.", errors: r.errors });
+    res.json({ ok: true, plan: r.plan, state: await loadState() });
+  } catch (e) { next(e); }
+});
+
 /* ---------- export ---------- */
 function parseRange(q) {
   const from = q.from && !Number.isNaN(Date.parse(q.from)) ? new Date(q.from) : null;
@@ -69,7 +79,7 @@ app.get("/api/export.:fmt", requireAuth, async (req, res, next) => {
     if (fmt === "csv") {
       res.setHeader("Content-Type", "text/csv; charset=utf-8");
       res.setHeader("Content-Disposition", `attachment; filename="trenink-${fileStamp()}.csv"`);
-      return res.send(toCSV(sessions));
+      return res.send(toCSV(state, sessions));
     }
     if (fmt === "txt") {
       res.setHeader("Content-Type", "text/plain; charset=utf-8");

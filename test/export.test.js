@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { toCSV, toDigest, toJSON } from "../src/export.js";
+import { BUILTIN_PLAN } from "../shared/plan.js";
 
 const sessions = [
   { date: "2026-08-10T06:00:00.000Z", day: "A", ctx: { climb: true }, ex: [
@@ -15,24 +16,24 @@ const state = { weights: { "A:squat": 82.5, "B:ohp": 40, "Z:nic": 5 }, fails: {}
 const withDeload = [sessions[0], { ...sessions[1], deload: true }];
 
 test("CSV má hlavičku a řádek na každou sérii", () => {
-  const csv = toCSV(sessions);
+  const csv = toCSV({}, sessions);
   const lines = csv.replace(/^﻿/, "").trim().split("\r\n");
   assert.equal(lines.length, 1 + 4);
-  assert.ok(lines[0].startsWith("datum,cas,trenink,lehky_tyden,cvik_id,cvik,serie,vaha_kg"));
-  assert.equal(lines[1], "2026-08-10,08:00,A,0,squat,Dřep s velkou činkou,1,80,6,2,480,1,0,0");
+  assert.ok(lines[0].startsWith("datum,cas,plan,trenink,lehky_tyden,cvik_id,cvik,serie,vaha_kg"));
+  assert.equal(lines[1], "2026-08-10,08:00," + BUILTIN_PLAN.name + ",A,0,squat,Dřep s velkou činkou,1,80,6,2,480,1,0,0");
   assert.ok(lines[4].includes('"Mrtvý tah (trhačky / trap bar)"') || lines[4].includes("Mrtvý tah (trhačky / trap bar)"));
 });
 
 test("CSV escapuje čárky a uvozovky", () => {
-  const csv = toCSV([{ date: "2026-09-05T06:00:00.000Z", day: "X", ctx: {}, ex: [{ id: 'a,"b"', w: 1, sets: [{ reps: 1, rir: 0, w: 1 }] }] }]);
+  const csv = toCSV({}, [{ date: "2026-09-05T06:00:00.000Z", day: "X", ctx: {}, ex: [{ id: 'a,"b"', w: 1, sets: [{ reps: 1, rir: 0, w: 1 }] }] }]);
   assert.ok(csv.includes('"a,""b"""'));
 });
 
 test("CSV označí lehký týden sloupcem lehky_tyden", () => {
-  const lines = toCSV(withDeload).replace(/^\ufeff/, "").trim().split("\r\n");
+  const lines = toCSV({}, withDeload).replace(/^\ufeff/, "").trim().split("\r\n");
   assert.ok(lines[0].includes("lehky_tyden"));
-  assert.equal(lines[1].split(",")[3], "0", "běžný trénink");
-  assert.equal(lines[4].split(",")[3], "1", "lehký trénink");
+  assert.equal(lines[1].split(",")[4], "0", "běžný trénink");
+  assert.equal(lines[4].split(",")[4], "1", "lehký trénink");
 });
 
 test("TXT označí lehké tréninky a vysvětlí je Claudovi", () => {
@@ -60,10 +61,12 @@ test("bez cyklu a bez deloadu se nic navíc nepřidává", () => {
 test("TXT rozbor obsahuje tréninky, kontext a pracovní váhy", () => {
   const txt = toDigest(state, sessions);
   assert.match(txt, /#1 10\. 8\. 2026 · A · Dřep & bench · předtím: lezení/);
+  assert.match(txt, new RegExp("Plán: " + BUILTIN_PLAN.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   assert.match(txt, /Dřep s velkou činkou: 80×6\(2\), 80×5\(1\)/);
   assert.match(txt, /A Dřep s velkou činkou: 82\.5 kg/);
   assert.match(txt, /B Tlak nad hlavu ve stoji: 40 kg/);
-  assert.ok(!txt.includes("Z nic"), "neznámý cvik se nevypisuje");
+  assert.match(txt, /Váhy cviků, které v aktuálním plánu nejsou/);
+  assert.match(txt, /Z nic: 5 kg/, "váha cviku mimo plán se neztratí");
   assert.match(txt, /Prosím o rozbor/);
 });
 
@@ -75,5 +78,6 @@ test("JSON export jde zpět naparsovat a nese tréninky i váhy", () => {
   assert.equal(o.sessions[1].deload, true);
   assert.equal(o.sessions.length, 2);
   assert.equal(o.weights["A:squat"], 82.5);
-  assert.equal(o.program.A.ex[0].id, "squat");
+  assert.equal(o.plan.days.A.ex[0].id, "squat");
+  assert.equal(o.plans[0].name, BUILTIN_PLAN.name);
 });

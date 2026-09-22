@@ -70,7 +70,7 @@ nav button[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--ink)
 .picker{display:flex;gap:6px;margin:12px 0}
 .picker button{flex:1;padding:9px 0;border:1px solid var(--line);background:var(--card);border-radius:3px;font-family:var(--display);font-size:19px;text-transform:uppercase;cursor:pointer}
 .picker button[aria-pressed="true"]{background:var(--ink);color:var(--paper);border-color:var(--ink)}
-.bigbtn{width:100%;padding:15px;border:0;border-radius:3px;background:var(--blue);color:#fff;font-family:var(--display);font-size:23px;letter-spacing:.05em;text-transform:uppercase;cursor:pointer}
+.bigbtn{width:100%;min-width:0;padding:15px;border:0;border-radius:3px;background:var(--blue);color:#fff;font-family:var(--display);font-size:23px;letter-spacing:.05em;text-transform:uppercase;cursor:pointer;overflow-wrap:anywhere}
 .bigbtn.ghost{background:none;color:var(--ink);border:1px solid var(--ink)}
 .bigbtn[disabled]{opacity:.4}
 .row{display:flex;gap:8px;margin:14px 0}
