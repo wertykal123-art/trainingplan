@@ -117,3 +117,8 @@ details p{font-size:13px;color:var(--steel);margin:6px 0 0}
 .linkbtn{display:block;text-align:center;text-decoration:none}
 .range{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0}
 .range input[type=date]{border:1px solid var(--line);border-radius:3px;padding:7px 9px;background:#fff;font-size:14px}
+.cycle{display:flex;align-items:center;gap:8px;margin:0 0 10px;padding:7px 10px;background:var(--card);border:1px solid var(--line);border-radius:3px;font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--steel)}
+.cycle span{font-weight:600;color:var(--ink)}
+.cycle button{margin-left:auto;background:none;border:1px solid var(--line);border-radius:3px;padding:5px 9px;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--steel);cursor:pointer;white-space:nowrap}
+.cycle button:active{background:var(--line)}
+.flag{display:inline-block;vertical-align:middle;background:var(--yellow);color:var(--ink);font-family:var(--body);font-size:10px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;padding:2px 6px;border-radius:2px}

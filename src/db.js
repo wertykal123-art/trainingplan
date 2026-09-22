@@ -30,9 +30,11 @@ export async function migrate() {
       day        TEXT NOT NULL,
       ctx        JSONB NOT NULL DEFAULT '{}'::jsonb,
       ex         JSONB NOT NULL DEFAULT '[]'::jsonb,
+      deload     BOOLEAN NOT NULL DEFAULT false,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
+    ALTER TABLE sessions ADD COLUMN IF NOT EXISTS deload BOOLEAN NOT NULL DEFAULT false;
     CREATE INDEX IF NOT EXISTS sessions_date_idx ON sessions (date);
     CREATE TABLE IF NOT EXISTS kv (
       key        TEXT PRIMARY KEY,
@@ -42,14 +44,14 @@ export async function migrate() {
   `);
 }
 
-const KV_KEYS = ["weights", "fails", "draft", "nextDay", "created", "lastBackup"];
-const KV_DEFAULTS = { weights: {}, fails: {}, draft: null, nextDay: "A", created: null, lastBackup: null };
+const KV_KEYS = ["weights", "fails", "draft", "nextDay", "created", "lastBackup", "cycle"];
+const KV_DEFAULTS = { weights: {}, fails: {}, draft: null, nextDay: "A", created: null, lastBackup: null, cycle: null };
 
 /** Vrátí celý stav deníku ve formátu, se kterým pracuje frontend. */
 export async function loadState() {
   const [kv, sessions] = await Promise.all([
     pool.query("SELECT key, value FROM kv"),
-    pool.query("SELECT date, day, ctx, ex FROM sessions ORDER BY date ASC"),
+    pool.query("SELECT date, day, ctx, ex, deload FROM sessions ORDER BY date ASC"),
   ]);
   const state = { ...KV_DEFAULTS };
   for (const r of kv.rows) if (KV_KEYS.includes(r.key)) state[r.key] = r.value;
@@ -59,6 +61,7 @@ export async function loadState() {
     day: r.day,
     ctx: r.ctx || {},
     ex: r.ex || [],
+    deload: !!r.deload,
   }));
   return state;
 }
@@ -90,9 +93,9 @@ export async function saveState(state) {
     const dates = sessions.map((s) => new Date(s.date).toISOString());
     for (const s of sessions) {
       await client.query(
-        `INSERT INTO sessions (date, day, ctx, ex) VALUES ($1, $2, $3::jsonb, $4::jsonb)
-         ON CONFLICT (date) DO UPDATE SET day = EXCLUDED.day, ctx = EXCLUDED.ctx, ex = EXCLUDED.ex, updated_at = now()`,
-        [new Date(s.date).toISOString(), s.day, JSON.stringify(s.ctx || {}), JSON.stringify(s.ex)],
+        `INSERT INTO sessions (date, day, ctx, ex, deload) VALUES ($1, $2, $3::jsonb, $4::jsonb, $5)
+         ON CONFLICT (date) DO UPDATE SET day = EXCLUDED.day, ctx = EXCLUDED.ctx, ex = EXCLUDED.ex, deload = EXCLUDED.deload, updated_at = now()`,
+        [new Date(s.date).toISOString(), s.day, JSON.stringify(s.ctx || {}), JSON.stringify(s.ex), !!s.deload],
       );
     }
     if (dates.length) {
@@ -114,6 +117,6 @@ export async function loadSessions(from, to) {
   if (from) { params.push(from); conds.push(`date >= $${params.length}`); }
   if (to) { params.push(to); conds.push(`date < $${params.length}`); }
   const where = conds.length ? "WHERE " + conds.join(" AND ") : "";
-  const r = await pool.query(`SELECT date, day, ctx, ex FROM sessions ${where} ORDER BY date ASC`, params);
-  return r.rows.map((x) => ({ date: x.date.toISOString(), day: x.day, ctx: x.ctx || {}, ex: x.ex || [] }));
+  const r = await pool.query(`SELECT date, day, ctx, ex, deload FROM sessions ${where} ORDER BY date ASC`, params);
+  return r.rows.map((x) => ({ date: x.date.toISOString(), day: x.day, ctx: x.ctx || {}, ex: x.ex || [], deload: !!x.deload }));
 }
