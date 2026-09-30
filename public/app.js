@@ -1,12 +1,21 @@
 "use strict";
-import { PROGRAM, CTX, ORDER } from "/shared/program.js";
+import { CTX } from "/shared/program.js";
+import { BUILTIN_PLAN, validatePlan, diffPlans, exerciseOf } from "/shared/plan.js";
+import * as ST from "/shared/stats.js";
+import { lineChart, columnChart, hbarChart, attachTips } from "/charts.js";
+import { CYCLE_WEEKS, cycleWeek, isDeloadWeek, cycleEnded, cycleEnd, deloadWeight, deloadSets, todayISO } from "/shared/cycle.js";
 
 const PLATES=[{w:25,c:"#B23A2E"},{w:20,c:"#1B4A8B"},{w:15,c:"#D9A400"},{w:10,c:"#2E7D4F"},{w:5,c:"#F5F4F1"},{w:2.5,c:"#B23A2E"},{w:1.25,c:"#9AA1AE"}];
 const LOCAL_KEY="trenink:local";   // záložní kopie v prohlížeči (offline)
-const DELOAD_EVERY=18; // po 18 trénincích (6 týdnů) doporuč lehčí týden
 
 /* ============ STAV ============ */
-const emptyState=()=>({weights:{},fails:{},sessions:[],draft:null,nextDay:"A",lastBackup:null,created:new Date().toISOString()});
+/* aktivní plán a pomocníci nad ním */
+const PLAN=()=>S.plan||BUILTIN_PLAN;
+const ORD=()=>PLAN().order;
+const DAY=(d)=>PLAN().days[d];
+const planOf=(s)=>(s&&s.planId!=null&&S.plans&&S.plans[s.planId])||PLAN();
+const setting=(k)=>!!(S.settings&&S.settings[k]);
+const emptyState=()=>({weights:{},fails:{},sessions:[],draft:null,nextDay:"A",lastBackup:null,created:new Date().toISOString(),cycle:{n:1,start:todayISO()},plan:BUILTIN_PLAN,plans:{0:BUILTIN_PLAN},settings:{}});
 let S=emptyState();
 let restT=null, restLeft=0, restTotal=0, restEnd=0;
 
@@ -23,7 +32,8 @@ const Sync={dirty:false,saving:false,lastSaved:null,online:navigator.onLine,erro
 async function api(path,opts={}){
   const r=await fetch(path,{credentials:"same-origin",headers:{"Content-Type":"application/json"},...opts});
   if(r.status===401){showLogin();throw new Error("unauthorized");}
-  if(!r.ok){let m="Chyba serveru";try{m=(await r.json()).error||m;}catch(e){}throw new Error(m);}
+  if(!r.ok){let m="Chyba serveru",list=null;try{const j=await r.json();m=j.error||m;list=j.errors||null;}catch(e){}
+    const err=new Error(m); err.errors=list; throw err;}
   return r.json();
 }
 
@@ -37,7 +47,9 @@ function merge(a,b){
     .sort((x,y)=>new Date(x.date)-new Date(y.date));
   const newer=(b.sessions||[]).length>=(a.sessions||[]).length?b:a;
   return Object.assign({},a,b,{sessions:all,weights:newer.weights||{},fails:newer.fails||{},
-    draft:a.draft||b.draft});
+    draft:a.draft||b.draft,cycle:b.cycle||a.cycle,
+    /* plán je vždy ten ze serveru, ne z nahrané zálohy */
+    plan:a.plan||b.plan,plans:a.plans||b.plans,settings:Object.assign({},b.settings,a.settings)});
 }
 
 async function load(){
@@ -112,7 +124,6 @@ async function logout(){
 
 /* ============ POMOCNÉ ============ */
 const round=(v,st)=>Math.max(0,Math.round(v/st)*st);
-const e1rm=(w,r,rir)=>w>0?w*(1+(r+(rir||0))/30):0;
 function plateList(total,barW){
   if(!barW||total<=barW) return null;
   let side=(total-barW)/2, out=[];
@@ -120,6 +131,7 @@ function plateList(total,barW){
   return side>0.02?null:out;
 }
 function keyOf(day,ex){return day+":"+ex;}
+const plural=(n,one,few,many)=>n===1?one:(n>=2&&n<=4?few:many);
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
 
 /* progrese: co dělat příště */
@@ -142,23 +154,96 @@ function progress(ex,day,logged){
 }
 
 /* ============ TRÉNINK ============ */
-function newDraft(day){
-  const p=PROGRAM[day];
-  return {day,date:new Date().toISOString(),ctx:{},ex:p.ex.map(e=>({id:e.id,w:S.weights[keyOf(day,e.id)]||0,
-    sets:Array.from({length:e.sets},()=>({done:false,reps:e.hi,rir:2,w:0}))}))};
+function inDeloadWeek(){return !!(S.cycle&&S.cycle.start)&&isDeloadWeek(S.cycle.start);}
+function blankEx(day,e,dl){
+  const base=S.weights[keyOf(day,e.id)]||0;
+  return {id:e.id,w:dl?deloadWeight(base,e.step):base,
+    sets:Array.from({length:dl?deloadSets(e.sets):e.sets},()=>({done:false,reps:e.hi,rir:2,w:0}))};
+}
+function newDraft(day,deload){
+  const dl=deload===undefined?inDeloadWeek():!!deload;
+  return {day,date:new Date().toISOString(),ctx:{},deload:dl,planId:PLAN().id||0,ex:DAY(day).ex.map(e=>blankEx(day,e,dl))};
+}
+/* ruční přepnutí lehkého týdne – zapnout i přeskočit */
+function toggleDeload(){
+  const d=S.draft; if(!d) return;
+  const want=!d.deload;
+  if(d.ex.some(e=>e.sets.some(s=>s.done))){d.deload=want;save();renderTrain();
+    toast(want?"Trénink označen jako lehký.":"Označení lehkého týdne zrušeno.");return;}
+  S.draft=newDraft(d.day,want); save(); renderTrain();
+  toast(want?"Lehký trénink: nižší váhy a o sérii míň.":"Plný trénink, váhy podle progrese.");
+}
+/* ============ NOVÝ PLÁN ============ */
+let planText="", planDraft=null, planErrors=null;
+
+function checkPlan(txt){
+  planText=txt;
+  const r=validatePlan(txt);
+  planDraft=r.ok?r.plan:null; planErrors=r.ok?null:r.errors;
+  renderData();
+  toast(r.ok?"Plán je v pořádku, zkontroluj změny níž.":"Plán neprošel kontrolou.");
+}
+function cancelPlan(){planText="";planDraft=null;planErrors=null;renderData();}
+async function applyPlanNow(){
+  if(!planDraft) return;
+  try{
+    const r=await api("/api/plan",{method:"POST",body:JSON.stringify({plan:planDraft})});
+    S=Object.assign(emptyState(),r.state);
+    planText="";planDraft=null;planErrors=null;
+    localSet(S); Sync.dirty=false; Sync.error=null; Sync.lastSaved=new Date().toISOString();
+    renderAll(); window.scrollTo({top:0});
+    toast("Plán nasazen, začal cyklus "+S.cycle.n+".");
+  }catch(e){
+    planErrors=e.errors||[e.message]; planDraft=null; renderData();
+    toast("Nasazení se nepovedlo.");
+  }
+}
+function planPreviewHTML(){
+  if(planErrors) return `<div class="banner" style="background:var(--red)"><b>Plán se nedá nasadit</b>${
+    planErrors.map(x=>"• "+esc(x)).join("<br>")}</div>`;
+  if(!planDraft) return "";
+  const d=diffPlans(PLAN(),planDraft);
+  const carried=d.kept.filter(x=>S.weights[x.key]>0);
+  const setBy=Object.keys(planDraft.startWeights||{});
+  return `<div class="item" style="border-color:var(--ink)">
+    <h3>${esc(planDraft.name)}</h3>
+    ${planDraft.note?`<div class="sub">${esc(planDraft.note)}</div>`:""}
+    <div class="sub">${planDraft.order.length} dny (${planDraft.order.join(", ")}) · ${
+      planDraft.order.reduce((a,x)=>a+planDraft.days[x].ex.length,0)} cviků</div>
+    <table>
+      <tr><td>Nové cviky</td><td>${d.added.length}</td></tr>
+      <tr><td>Odcházejí z plánu</td><td>${d.removed.length}</td></tr>
+      <tr><td>Zůstávají s přenesenou váhou</td><td>${carried.length}</td></tr>
+      <tr><td>Váhu určuje plán</td><td>${setBy.length}</td></tr>
+    </table>
+    ${d.added.length?`<p class="hint" style="margin-top:9px"><b>Nové:</b> ${d.added.map(x=>esc(x.day+" "+x.name)).join(", ")}</p>`:""}
+    ${d.removed.length?`<p class="hint"><b>Odcházejí:</b> ${d.removed.map(x=>esc(x.day+" "+x.name)).join(", ")}. Historie i jejich váhy zůstanou uložené.</p>`:""}
+    ${carried.length?`<p class="hint"><b>Přenesené váhy:</b> ${carried.map(x=>esc(x.day+" "+x.name)+" "+S.weights[x.key]+" kg").join(", ")}</p>`:""}
+    ${setBy.length?`<p class="hint"><b>Plán určuje váhy:</b> ${setBy.map(k=>esc(k)+" "+planDraft.startWeights[k]+" kg").join(", ")}</p>`:""}
+    <div class="banner" style="margin:10px 0 0"><b>Co se stane</b>Nasazením začne nový cyklus, jeho poslední týden bude zase lehký. Rozdělaný trénink se zahodí. Historie zůstane a zobrazí se podle plánu, ve kterém jsi ji odcvičil.</div>
+    <div class="row" style="margin:10px 0 0"><button class="bigbtn ghost" id="planCancel">Zrušit</button><button class="bigbtn" id="planApply">Nasadit plán</button></div>
+  </div>`;
+}
+
+function newCycle(){
+  if(!confirm("Začít nový cyklus? Historie i pracovní váhy zůstanou. Vynuluje se jen počítadlo týdnů a lehký týden vyjde na poslední týden nového cyklu."))return;
+  S.cycle={n:((S.cycle&&S.cycle.n)||1)+1,start:todayISO()};
+  S.draft=null; save(); renderAll();
+  toast("Cyklus "+S.cycle.n+" začal.");
 }
 function renderTrain(){
   const v=document.getElementById("view-train");
-  if(S.draft&&!PROGRAM[S.draft.day]) S.draft=null;
-  const day=S.draft?S.draft.day:(PROGRAM[S.nextDay]?S.nextDay:"A"), p=PROGRAM[day];
+  if(S.draft&&(!DAY(S.draft.day)||S.draft.planId!==(PLAN().id||0))) S.draft=null;
+  const day=S.draft?S.draft.day:(DAY(S.nextDay)?S.nextDay:ORD()[0]), p=DAY(day);
   document.getElementById("dayStamp").textContent=day;
   document.getElementById("dayTitle").textContent=p.title;
   document.getElementById("sesCount").textContent=S.sessions.length+" tréninků";
-  document.getElementById("wkCount").textContent="týden "+(Math.floor(S.sessions.length/3)+1);
+  const wk=cycleWeek(S.cycle.start), over=cycleEnded(S.cycle.start);
+  document.getElementById("wkCount").textContent=over?"cyklus skončil":"týden "+wk+"/"+CYCLE_WEEKS;
   v.innerHTML="";
 
   const pick=document.createElement("div");pick.className="picker";
-  ORDER.forEach(d=>{const b=document.createElement("button");b.textContent=d+" · "+PROGRAM[d].title.split(" ")[0];
+  ORD().forEach(d=>{const b=document.createElement("button");b.textContent=d+" · "+DAY(d).title.split(" ")[0];
     b.setAttribute("aria-pressed",d===day);b.onclick=()=>{if(S.draft&&S.draft.ex.some(e=>e.sets.some(s=>s.done))&&d!==day){if(!confirm("Rozdělaný trénink se zahodí. Přepnout?"))return;}
       S.draft=newDraft(d);S.nextDay=d;save();renderTrain();};
     pick.appendChild(b);});
@@ -167,19 +252,31 @@ function renderTrain(){
   const sy=document.createElement("div");sy.className="sync";sy.style.margin="-4px 0 8px";sy.textContent=Sync.label();v.appendChild(sy);
   updateSyncLabel();
 
-  if(S.sessions.length>0 && S.sessions.length%DELOAD_EVERY===0){
-    v.insertAdjacentHTML("beforeend",'<div class="banner"><b>Čas na lehčí týden</b>Máš za sebou 6 týdnů. Tenhle týden ubírej: každý cvik −10 % váhy a o jednu sérii míň. Příští týden navážeš tam, kde jsi skončil.</div>');
-  }
   if(!S.draft) S.draft=newDraft(day);
+
+  const strip=document.createElement("div");strip.className="cycle";
+  strip.innerHTML=`<span>Cyklus ${S.cycle.n} · ${over?"po konci":"týden "+wk+" ze "+CYCLE_WEEKS}${S.draft.deload?" · lehký":""}</span>`;
+  const tg=document.createElement("button");tg.textContent=S.draft.deload?"Přeskočit lehký":"Udělat lehký";
+  tg.onclick=toggleDeload;strip.appendChild(tg);v.appendChild(strip);
+
+  if(S.draft.deload){
+    v.insertAdjacentHTML("beforeend",'<div class="banner"><b>Lehký týden</b>Váhy jsou předvyplněné o 10 % níž a je o sérii míň. Progrese se dnes nepočítá a pracovní váhy zůstanou tam, kde byly. V exportu bude trénink označený, aby ho Claude nebral jako propad.</div>');
+  }
+  if(over){
+    const b=document.createElement("div");b.className="banner";b.style.background="var(--blue)";
+    b.innerHTML='<b>Cyklus skončil</b>Vyexportuj data v záložce Data, nahraj je Claudovi pro nový plán a pak tady začni další cyklus.';
+    const btn=document.createElement("button");btn.className="bigbtn";btn.style.marginTop="9px";
+    btn.textContent="Začít nový cyklus";btn.onclick=newCycle;b.appendChild(btn);v.appendChild(b);
+  }
 
   p.ex.forEach((e,i)=>{
     let d=S.draft.ex[i];
-    if(!d||d.id!==e.id){d={id:e.id,w:S.weights[keyOf(day,e.id)]||0,sets:Array.from({length:e.sets},()=>({done:false,reps:e.hi,rir:2,w:0}))};S.draft.ex[i]=d;}
+    if(!d||d.id!==e.id){d=blankEx(day,e,!!S.draft.deload);S.draft.ex[i]=d;}
     const card=document.createElement("article");card.className="ex";
     const allDone=d.sets.every(s=>s.done); if(allDone)card.classList.add("done");
     const reps=e.lo===e.hi?e.lo:e.lo+"–"+e.hi;
     card.innerHTML=`<div class="ex-head"><span class="num">${i+1}</span><h3>${e.name}</h3>
-      <span class="tag">${e.sets} × ${reps}</span></div><div class="ex-body"></div>`;
+      <span class="tag">${d.sets.length} × ${reps}</span></div><div class="ex-body"></div>`;
     const body=card.querySelector(".ex-body");
 
     const lr=document.createElement("div");lr.className="loadrow";
@@ -223,6 +320,19 @@ function renderTrain(){
     v.appendChild(card);
   });
 
+  if(setting("weighIn")){
+    const last=ST.bodyWeightSeries(S.sessions).pop();
+    const card=document.createElement("div");card.className="item";
+    card.innerHTML=`<h3>Vážení</h3><div class="sub">Před tréninkem, po záchodě a ještě před pitím. Vždycky stejně.</div>
+      <div class="loadrow" style="margin-top:10px">
+        <label class="wfield"><input type="number" step="0.1" min="20" max="300" inputmode="decimal" value="${S.draft.bw||""}" placeholder="—" aria-label="tělesná váha"><span>kg</span></label>
+        <div class="hint">${last?`Minule: <b>${num(last.v)} kg</b> · ${fmt(last.t)}`:"Jedno číslo nic neznamená. Trend se počítá z průměru za dva týdny."}</div>
+      </div>`;
+    const bi=card.querySelector("input");
+    bi.oninput=()=>{const x=parseFloat(bi.value);S.draft.bw=x>0?x:null;save();};
+    v.appendChild(card);
+  }
+
   if(!S.draft.ctx)S.draft.ctx={};
   const cx=document.createElement("div");cx.className="item";
   cx.innerHTML=`<h3>Posledních 48 hodin</h3><div class="sub">Podle toho se pozná, proč ti některý trénink sedl a jiný ne.</div>
@@ -239,27 +349,30 @@ function renderTrain(){
   v.insertAdjacentHTML("beforeend",'<p class="hint" style="margin:6px 0 20px">Zapisuj i série, které se nepovedly — z toho se počítá příští váha. „Zásoba“ = kolik opakování bys ještě zvládl navíc.</p>');
 }
 function lastFor(day,exId){
-  for(let i=S.sessions.length-1;i>=0;i--){const s=S.sessions[i];if(s.day!==day)continue;
+  for(let i=S.sessions.length-1;i>=0;i--){const s=S.sessions[i];if(s.day!==day||s.deload)continue;
     const e=s.ex.find(x=>x.id===exId);if(e&&e.sets.length)return {w:e.sets[0].w||e.w,reps:e.sets.map(x=>x.reps)};}
   return null;
 }
 function finish(){
   const d=S.draft; if(!d) return;
-  const day=d.day, prog=PROGRAM[day];
+  const day=d.day, prog=DAY(day);
   const logged=d.ex.map(e=>({id:e.id,w:e.w,sets:e.sets.filter(s=>s.done).map(s=>({reps:s.reps,rir:s.rir,w:s.w||e.w}))}))
                    .filter(e=>e.sets.length);
   if(!logged.length){toast("Nemáš zapsanou žádnou sérii.");return;}
-  prog.ex.forEach((e,i)=>{
-    const k=keyOf(day,e.id), doneSets=d.ex[i].sets.filter(s=>s.done);
-    if(d.ex[i].w>0 && S.weights[k]!==d.ex[i].w) S.weights[k]=d.ex[i].w;
-    if(!doneSets.length) return;
-    const r=progress(e,day,d.ex[i].sets);
-    if(r.w>0) S.weights[k]=r.w;
-  });
-  S.sessions.push({date:new Date().toISOString(),day,ctx:d.ctx||{},ex:logged});
-  S.nextDay=ORDER[(ORDER.indexOf(day)+1)%3];
+  if(!d.deload){
+    prog.ex.forEach((e,i)=>{
+      const k=keyOf(day,e.id), doneSets=d.ex[i].sets.filter(s=>s.done);
+      if(d.ex[i].w>0 && S.weights[k]!==d.ex[i].w) S.weights[k]=d.ex[i].w;
+      if(!doneSets.length) return;
+      const r=progress(e,day,d.ex[i].sets);
+      if(r.w>0) S.weights[k]=r.w;
+    });
+  }
+  S.sessions.push({date:new Date().toISOString(),day,ctx:d.ctx||{},deload:!!d.deload,planId:d.planId??(PLAN().id||0),
+    weight:setting("weighIn")&&d.bw>0?d.bw:null,ex:logged});
+  S.nextDay=ORD()[(ORD().indexOf(day)+1)%ORD().length];
   S.draft=null; save(); stopRest();
-  toast("Uloženo. Příště: trénink "+S.nextDay);
+  toast(d.deload?"Lehký trénink uložen, pracovní váhy zůstávají. Příště: "+S.nextDay:"Uloženo. Příště: trénink "+S.nextDay);
   renderTrain(); renderHistory(); renderStats();
   window.scrollTo({top:0,behavior:"smooth"});
 }
@@ -288,7 +401,10 @@ document.getElementById("restAdd").onclick=()=>{restEnd+=30000;restTotal+=30;tic
 
 /* ============ HISTORIE ============ */
 function fmt(d){return new Date(d).toLocaleDateString("cs-CZ",{day:"numeric",month:"numeric",year:"2-digit"});}
-function nameOf(day,id){const p=PROGRAM[day];const e=p&&p.ex.find(x=>x.id===id);return e?e.name:id;}
+function nameOf(day,id,ses){
+  for(const p of [ses?planOf(ses):null,PLAN(),BUILTIN_PLAN]){const e=p&&exerciseOf(p,day,id);if(e)return e.name;}
+  return id;
+}
 function renderHistory(){
   const v=document.getElementById("view-history");
   if(!S.sessions.length){v.innerHTML='<p class="empty">Zatím prázdno. Po prvním uloženém tréninku se sem zapíše všechno, co jsi odcvičil.</p>';return;}
@@ -296,10 +412,11 @@ function renderHistory(){
   [...S.sessions].reverse().forEach(s=>{
     const vol=s.ex.reduce((a,e)=>a+e.sets.reduce((b,x)=>b+(x.w||0)*x.reps,0),0);
     const el=document.createElement("div");el.className="item";
-    el.innerHTML=`<h3>${esc(s.day)} · ${PROGRAM[s.day]?PROGRAM[s.day].title:""}</h3>
+    const sp=planOf(s), sd=sp.days[s.day];
+    el.innerHTML=`<h3>${esc(s.day)} · ${sd?esc(sd.title):""}${s.deload?' <span class="flag">lehký</span>':""}</h3>
       <div class="sub">${fmt(s.date)} · objem ${Math.round(vol).toLocaleString("cs-CZ")} kg · ${s.ex.reduce((a,e)=>a+e.sets.length,0)} sérií${
         s.ctx&&Object.keys(s.ctx).some(k=>s.ctx[k])?" · "+CTX.filter(c=>s.ctx[c.k]).map(c=>c.label.toLowerCase()).join(", "):""}</div>
-      <table>${s.ex.map(e=>`<tr><td>${esc(nameOf(s.day,e.id))}</td><td>${e.sets.map(x=>(x.w??0)+"×"+x.reps).join(" · ")}</td></tr>`).join("")}</table>
+      <table>${s.ex.map(e=>`<tr><td>${esc(nameOf(s.day,e.id,s))}</td><td>${e.sets.map(x=>(x.w??0)+"×"+x.reps).join(" · ")}</td></tr>`).join("")}</table>
       <div class="row" style="margin:8px 0 0"><button class="bigbtn ghost" style="font-size:15px;padding:8px" data-del="${esc(s.date)}">Smazat trénink</button></div>`;
     el.querySelector("[data-del]").onclick=()=>{if(!confirm("Smazat tenhle trénink z historie? Pracovní váhy zůstanou."))return;
       S.sessions=S.sessions.filter(x=>x.date!==s.date);save();renderHistory();renderStats();renderTrain();toast("Trénink smazán.");};
@@ -308,64 +425,226 @@ function renderHistory(){
 }
 
 /* ============ PROGRES ============ */
+const dm=(d)=>{const x=new Date(d);return x.getDate()+"."+(x.getMonth()+1)+".";};
+const kg=(v)=>Math.round(v).toLocaleString("cs-CZ");
+const signed=(v,dec=0)=>(v>0?"+":v<0?"−":"")+Math.abs(v).toFixed(dec).replace(".",",");
+/* číslo s desetinnou čárkou, nuly za čárkou se zahazují */
+const num=(v,dec=1)=>(Math.round(v*10**dec)/10**dec).toLocaleString("cs-CZ",{maximumFractionDigits:dec});
+const signedNum=(v,dec=1)=>(v>0?"+":v<0?"−":"")+num(Math.abs(v),dec);
+/* rozptyl hodin: pod hodinu v minutách, jinak v hodinách */
+const czSpan=(h)=>h<0.1?"":h<1?Math.round(h*60)+" minut":num(h)+" h";
+const czDays=(v)=>{const r=Math.round(v*10)/10; return num(r)+" "+(r===1?"den":Number.isInteger(r)&&r<5?"dny":"dne");};
+
+/* dlaždice: hodnota, pod ní rozdíl proti předchozímu stejně dlouhému oknu.
+   Šipka dostane barvu jen tam, kde má směr jasný význam. */
+function tile(label,value,sub,delta){
+  const arrow=delta&&delta.show?`<i class="arw ${delta.good===true?"up":delta.good===false?"down":""}">${delta.v>0?"▲":delta.v<0?"▼":"▬"}</i> `:"";
+  return `<div class="tile"><small>${label}</small><b>${value}</b><span>${arrow}${sub}</span></div>`;
+}
+
 function renderStats(){
   const v=document.getElementById("view-stats");
-  if(S.sessions.length<2){v.innerHTML='<p class="empty">Graf se objeví po druhém tréninku. Sleduje odhadované maximum na 1 opakování — tedy sílu, ne jen zvednutou váhu.</p>';return;}
-  const track=[["A","squat"],["A","bench"],["B","dead"],["B","ohp"]];
-  v.innerHTML='<h2 class="sec">Odhad maxima na 1 opakování</h2>';
-  track.forEach(([day,id])=>{
-    const name=PROGRAM[day].ex.find(e=>e.id===id).name;
-    const pts=[];
-    S.sessions.forEach(s=>{if(s.day!==day)return;const e=s.ex.find(x=>x.id===id);if(!e)return;
-      const best=Math.max(...e.sets.map(x=>e1rm(x.w,x.reps,x.rir)));if(best>0)pts.push({t:s.date,v:best});});
-    if(pts.length<2)return;
-    const first=pts[0].v,last=pts[pts.length-1].v,d=last-first;
-    v.insertAdjacentHTML("beforeend",`<div class="chart"><h3>${name}<span>${Math.round(last)} kg ${d>=0?"▲ +":"▼ "}${Math.round(Math.abs(d))}</span></h3>${spark(pts)}</div>`);
-  });
-  const weeks={};
-  S.sessions.forEach(s=>{const w=Math.floor((new Date(s.date)-new Date(S.sessions[0].date))/6048e5);
-    weeks[w]=(weeks[w]||0)+s.ex.reduce((a,e)=>a+e.sets.reduce((b,x)=>b+(x.w||0)*x.reps,0),0);});
-  const ks=Object.keys(weeks).map(Number).sort((a,b)=>a-b);
-  v.insertAdjacentHTML("beforeend",`<h2 class="sec">Celkový objem po týdnech</h2><div class="chart">${
-    spark(ks.map(k=>({t:k,v:weeks[k]})),true)}<p class="hint" style="margin-top:8px">Objem = váha × opakování, sečteno přes celý týden. Roste-li plynule, jsi na dobré cestě; skokový nárůst je nejčastější příčina bolavých kloubů.</p></div>`);
-  const rows=[];
-  CTX.forEach(c=>{
-    const on=[],off=[];
-    S.sessions.forEach(s=>{
-      const q=s.ex.reduce((a,e)=>a+e.sets.reduce((b,x)=>b+(x.rir||0),0),0)/Math.max(1,s.ex.reduce((a,e)=>a+e.sets.length,0));
-      ((s.ctx&&s.ctx[c.k])?on:off).push(q);
-    });
-    if(on.length>=2&&off.length>=2){
-      const avg=a=>a.reduce((x,y)=>x+y,0)/a.length;
-      const d=avg(on)-avg(off);
-      rows.push(`<tr><td>${c.label} předtím <span style="color:var(--steel)">(${on.length}× / ${off.length}×)</span></td><td>${
-        d>0.25?"těžší série":d<-0.25?"lehčí série":"beze změny"} · ${d>0?"+":""}${d.toFixed(1)}</td></tr>`);
+  const all=S.sessions;
+  if(all.length<2){v.innerHTML='<p class="empty">Statistiky se rozjedou po druhém uloženém tréninku. Pak tu uvidíš sílu po cvicích, objem, únavu i to, co ti bere lezení a capoeira.</p>';return;}
+  const plan=PLAN(), out=[];
+
+  /* ---------- 1. souhrn cyklu ----------
+     Běžící cyklus se nedá poměřovat s celým minulým oknem, dokud neskončí.
+     Proto se porovnává tempo na týden, které je srovnatelné kdykoli. */
+  const cStart=ST.dayStart(S.cycle.start), DAYMS=864e5;
+  const cycleEndMs=+cStart+CYCLE_WEEKS*7*DAYMS;
+  const curTo=Math.min(+ST.dayStart(new Date())+DAYMS,cycleEndMs);
+  const elapsed=Math.max(1,Math.round((curTo-+cStart)/DAYMS)), curWeeks=elapsed/7;
+  const cur=ST.inWindow(all,cStart,new Date(curTo));
+  const prev=ST.inWindow(all,new Date(+cStart-CYCLE_WEEKS*7*DAYMS),cStart);
+  const a=ST.summary(cur), b=ST.summary(prev), sd=ST.strengthDelta(cur,prev,plan);
+  const hasPrev=b.n>0;
+  const rate=(x,w)=>w>0?x/w:0;
+  const dPct=(x,y)=>y>0?(x-y)/y*100:0;
+  const dTr=dPct(rate(a.n,curWeeks),rate(b.n,CYCLE_WEEKS));
+  const dVol=dPct(rate(a.volume,curWeeks),rate(b.volume,CYCLE_WEEKS));
+  const dRir=(a.meanRir!==null&&b.meanRir!==null)?a.meanRir-b.meanRir:null;
+  out.push(`<h2 class="sec">Cyklus ${S.cycle.n} · ${cycleEnded(S.cycle.start)?"po konci":"týden "+cycleWeek(S.cycle.start)+" ze "+CYCLE_WEEKS}</h2>
+  <div class="tiles">
+    ${tile("Tréninků",a.n,`${hasPrev?signed(dTr)+" % · ":""}${rate(a.n,curWeeks).toFixed(1).replace(".",",")} týdně${a.deloads?" · "+a.deloads+" lehkých":""}`,
+      {show:hasPrev,v:dTr,good:dTr>2?true:dTr<-2?false:null})}
+    ${tile("Objem",kg(a.volume)+" kg",`${hasPrev?signed(dVol)+" % · ":""}${kg(rate(a.volume,curWeeks))} kg týdně`,{show:hasPrev,v:dVol,good:null})}
+    ${tile("Zásoba v opakováních",a.meanRir===null?"—":a.meanRir.toFixed(1).replace(".",","),
+      dRir!==null?`${signed(dRir,1)} proti minulým 4 týdnům`:`z ${a.sets} sérií`,{show:dRir!==null,v:dRir||0,good:null})}
+    ${tile("Síla",sd.pct===null?"—":signed(sd.pct,1)+" %",
+      sd.pct===null?"chybí srovnání s minulým obdobím":`průměr přes ${sd.lifts} ${sd.lifts===1?"cvik":sd.lifts<5?"cviky":"cviků"}`,
+      {show:sd.pct!==null,v:sd.pct||0,good:sd.pct>0.5?true:sd.pct<-0.5?false:null})}
+  </div>
+  <p class="hint">Cyklus běží ${elapsed} ${elapsed===1?"den":elapsed<5?"dny":"dní"} z ${CYCLE_WEEKS*7}, proto se srovnává tempo na týden, ne součet. Protějšek jsou předchozí čtyři týdny${hasPrev?` (${b.n} tréninků)`:", zatím bez dat"}. Síla je průměrná změna odhadu maxima u sledovaných cviků; lehké týdny se do ní nepočítají.</p>`);
+
+  /* ---------- 2. síla po cvicích ---------- */
+  const lifts=ST.trackedLifts(plan).map(l=>({...l,pts:ST.liftSeries(all,l.day,l.id)})).filter(l=>l.pts.length>=2);
+  if(lifts.length){
+    out.push('<h2 class="sec">Odhad maxima na 1 opakování</h2>');
+    for(const l of lifts){
+      const pts=l.pts.map(p=>({...p,tip:fmt(p.t)+": "+Math.round(p.v)+" kg"}));
+      const first=pts[0].v,last=pts[pts.length-1].v, tr=ST.slopePerDay(pts);
+      const perWeek=tr?tr.slope*7:null;
+      const tempo=perWeek===null?"":`${signedNum(perWeek)} kg za týden · ${pts.length} měření${tr.r2<0.3?" · hodně rozkolísané":""}`;
+      out.push(`<div class="chart"><h3>${esc(l.name)}<span>${Math.round(last)} kg · ${signed(last-first)} kg</span></h3>
+        ${lineChart(pts,{unit:"kg",xLabel:p=>dm(p.t),endLabel:false})}
+        <p class="hint" style="margin-top:6px">${tempo}</p>
+        <details><summary>Tabulka</summary><table>${pts.map(p=>`<tr><td>${fmt(p.t)}</td><td>${Math.round(p.v)} kg</td></tr>`).join("")}</table></details></div>`);
     }
-  });
-  if(rows.length) v.insertAdjacentHTML("beforeend",`<h2 class="sec">Jak se to pere se zbytkem života</h2><div class="item"><table>${rows.join("")}</table>
-    <p class="hint" style="margin-top:9px">Číslo je rozdíl v průměrné zásobě opakování. Kladné = po téhle aktivitě ti série přijdou těžší. Pár desetin je šum, půl opakování a víc už stojí za úpravu rozvrhu.</p></div>`);
-  if(!v.querySelector(".chart"))v.innerHTML='<p class="empty">Zatím málo dat.</p>';
-}
-function spark(pts,bars){
-  const W=300,H=72,pad=6;
-  const vs=pts.map(p=>p.v),mn=Math.min(...vs),mx=Math.max(...vs),rg=(mx-mn)||1;
-  const x=i=>pad+i*(W-2*pad)/Math.max(1,pts.length-1), y=v=>H-pad-((v-mn)/rg)*(H-2*pad);
-  if(bars){const bw=(W-2*pad)/pts.length-3;
-    return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" role="img">${pts.map((p,i)=>
-      `<rect x="${pad+i*((W-2*pad)/pts.length)}" y="${Math.min(H-pad-2,y(p.v))}" width="${Math.max(4,bw)}" height="${Math.max(2,H-pad-y(p.v))}" fill="#1B4A8B" opacity=".85"/>`).join("")}</svg>`;}
-  return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" role="img" preserveAspectRatio="none">
-    <polyline fill="none" stroke="#1B4A8B" stroke-width="2" points="${pts.map((p,i)=>x(i)+","+y(p.v)).join(" ")}"/>
-    ${pts.map((p,i)=>`<circle cx="${x(i)}" cy="${y(p.v)}" r="2.5" fill="#15171C"/>`).join("")}</svg>`;
+    out.push('<p class="hint">Odhad maxima počítá z váhy, opakování i zásoby, takže roste i tehdy, když přidáš jen opakování. Lehké týdny jsou vynechané.</p>');
+  }
+
+  /* ---------- 3. co se hýbe a co stojí ---------- */
+  const prog=ST.exerciseProgress(all,plan,S.weights);
+  if(prog.length){
+    const chip={roste:["ok","roste"],drzi:["neutral","drží"],stagnuje:["warn","stagnuje"],couva:["bad","couvá"],"malo-dat":["neutral","málo dat"]};
+    const row=(r)=>{const[c,t]=chip[r.state];
+      return `<tr><td>${esc(r.day)} · ${esc(r.name)}<br><span class="sub2">${r.n}× zapsáno</span></td>
+        <td>${r.now>0?kg(r.now)+" kg":"vlastní váha"}</td>
+        <td>${r.change?signedNum(r.change)+" kg":(r.repsChange>0?signed(r.repsChange)+" op.":"0")}</td>
+        <td><span class="chip ${c}">${t}</span></td></tr>`;};
+    const head='<tr><th>Cvik</th><th>Teď</th><th>Změna</th><th>Stav</th></tr>';
+    const pozor=prog.filter(r=>r.state!=="roste"), rostou=prog.filter(r=>r.state==="roste");
+    out.push(`<h2 class="sec">Co se hýbe a co stojí</h2><div class="item">
+      ${pozor.length?`<table class="grid">${head}${pozor.map(row).join("")}</table>`
+        :`<p class="hint" style="margin:0">Žádný cvik nestojí na místě. Všech ${rostou.length} jde nahoru.</p>`}
+      ${rostou.length?`<details><summary>${rostou.length} ${rostou.length<5?"cviky rostou":"cviků roste"} podle plánu</summary>
+        <table class="grid">${head}${rostou.map(row).join("")}</table></details>`:""}
+      <p class="hint" style="margin-top:9px">Stagnuje = tři a víc tréninků po sobě bez přidání váhy i bez přidání opakování. Tam se vyplatí sáhnout po změně: jiný rozsah opakování, víc pauzy, nebo cvik vyměnit.</p></div>`);
+  }
+
+  /* ---------- 4. objem po týdnech ---------- */
+  const wk=ST.weeklyVolume(all,12);
+  if(wk.length>=2){
+    const bars=wk.map(w=>({label:dm(w.week),v:Math.round(w.volume),mark:w.deload,
+      tip:`týden od ${dm(w.week)}: ${kg(w.volume)} kg, ${w.sets} sérií${w.deload?", lehký":""}${w.n?"":", bez tréninku"}`}));
+    const jump=ST.biggestJump(wk);
+    out.push(`<h2 class="sec">Objem po týdnech</h2><div class="chart">
+      ${columnChart(bars,{unit:"kg"})}
+      <p class="hint" style="margin-top:6px"><span class="key"></span> lehký týden · objem = váha × opakování</p>
+      ${jump&&jump.pct>30?`<p class="hint" style="color:var(--red)">Největší skok mezi týdny: ${signed(jump.pct)} %, z týdne od ${dm(jump.from.week)} na ${dm(jump.to.week)} Skoky nad třetinu bývají příčinou podrážděných kloubů.</p>`:""}
+      <details><summary>Tabulka</summary><table>${wk.map(w=>`<tr><td>od ${dm(w.week)}${w.deload?" · lehký":""}</td><td>${kg(w.volume)} kg · ${w.sets} sérií</td></tr>`).join("")}</table></details></div>`);
+  }
+
+  /* ---------- 5. série po svalových skupinách ---------- */
+  const gNow=ST.groupSets(cur,planOf), gPrev=ST.groupSets(prev,planOf);
+  const gKeys=[...new Set([...Object.keys(gNow),...Object.keys(gPrev)])];
+  if(gKeys.length){
+    const rows=gKeys.map(g=>({label:g,v:Math.round((gNow[g]||0)/curWeeks*10)/10,ref:Math.round((gPrev[g]||0)/CYCLE_WEEKS*10)/10,
+      tip:`${g}: ${num((gNow[g]||0)/curWeeks)} sérií týdně teď, ${num((gPrev[g]||0)/CYCLE_WEEKS)} v předchozích 4 týdnech`})).sort((x,y)=>y.v-x.v);
+    out.push(`<h2 class="sec">Série podle svalových skupin</h2><div class="chart">
+      ${hbarChart(rows,{unit:"sérií týdně"})}
+      <p class="hint" style="margin-top:6px">Sérií za týden. <span class="key ref"></span> svislá ryska = předchozí čtyři týdny. Počítají se odcvičené série, ne plánované. K zádům si připočti lezení.</p></div>`);
+  }
+
+  /* ---------- 6. zásoba a únava ---------- */
+  const rirPts=all.filter(s=>!s.deload&&ST.sessionMeanRir(s)!==null).slice(-16)
+    .map(s=>({t:s.date,v:ST.sessionMeanRir(s),tip:fmt(s.date)+" · "+s.day+": zásoba "+num(ST.sessionMeanRir(s))}));
+  if(rirPts.length>=4){
+    const h=Math.floor(rirPts.length/2);
+    const d1=ST.mean(rirPts.slice(0,h).map(p=>p.v)), d2=ST.mean(rirPts.slice(h).map(p=>p.v)), dd=d2-d1;
+    const verdict=dd<=-0.4?"Zásoba klesá. Buď jdeš nahoru s váhou, nebo se hromadí únava. Když váhy stojí a zásoba padá, uber."
+      :dd>=0.4?"Zásoba roste. Série jsou čím dál lehčí, je prostor přidat."
+      :"Zásoba drží. Zatížení odpovídá tomu, co zvládáš.";
+    out.push(`<h2 class="sec">Zásoba a únava</h2><div class="chart">
+      ${lineChart(rirPts,{xLabel:p=>dm(p.t),endLabel:false})}
+      <p class="hint" style="margin-top:6px">${verdict} Druhá polovina období proti první: ${signed(dd,1)} opakování.</p></div>`);
+  }
+
+  /* ---------- 7. vliv lezení a capoeiry ---------- */
+  const eff=ST.contextEffects(all,CTX);
+  if(eff.some(e=>e.n1>0)){
+    const say=(e)=>{
+      if(e.verdict==="malo-dat") return `zatím málo dat`;
+      if(e.verdict==="sum") return `nerozeznatelné od běžného kolísání`;
+      const smer=e.diff<0?"těžší":"lehčí";
+      return `${e.verdict==="zretelny"?"zřetelně":"spíš"} ${smer} o ${Math.abs(e.diff).toFixed(1).replace(".",",")} opakování`;
+    };
+    out.push(`<h2 class="sec">Co ti bere lezení a capoeira</h2><div class="item"><table class="grid">
+      <tr><th>Předtím</th><th>Tréninků</th><th>Jak to vyšlo</th></tr>
+      ${eff.map(e=>`<tr><td>${esc(e.label)}</td><td>${e.n1} z ${e.n1+e.n2}</td><td class="wrap">${say(e)}</td></tr>`).join("")}
+    </table>
+    <p class="hint" style="margin-top:9px">Porovnává se průměrná zásoba opakování v tréninku. Nižší zásoba znamená, že série byly těžší. Rozdíl se vysloví, teprve když přesáhne kolísání mezi tréninky, a k tomu je potřeba aspoň čtyři tréninky v každé skupině.</p></div>`);
+  }
+
+  /* ---------- 8. docházka ---------- */
+  const rh=ST.rhythm(all);
+  if(rh.medianGap!==null){
+    const dows=["Po","Út","St","Čt","Pá","So","Ne"];
+    const rows=rh.byDow.map((n,i)=>({label:dows[i],v:n,tip:dows[i]+": "+n+" tréninků"}));
+    out.push(`<h2 class="sec">Docházka</h2><div class="item"><table>
+      <tr><td>Obvyklá mezera mezi tréninky</td><td>${czDays(rh.medianGap)}</td></tr>
+      <tr><td>Nejdelší pauza</td><td>${czDays(rh.maxGap)}</td></tr>
+      <tr><td>Od posledního tréninku</td><td>${rh.sinceLast===0?"dnes":"před "+czDays(rh.sinceLast)}</td></tr>
+    </table></div>
+    <div class="chart">${hbarChart(rows,{unit:"tréninků",labelW:30})}
+    <p class="hint" style="margin-top:6px">Pravidelnost rozhoduje o výsledku víc než volba cviků. Tři tréninky rozložené po týdnu unese regenerace líp než tři za sebou.</p></div>`);
+  }
+
+  /* ---------- 8b. tělesná váha ---------- */
+  if(setting("weighIn")){
+    const wp=ST.bodyWeightSeries(all);
+    if(wp.length>=2){
+      const roll=ST.rollingMean(wp,14);
+      const pts=roll.map(p=>({t:p.t,v:p.avg,raw:p.v,
+        tip:`${fmt(p.t)}: ${num(p.v)} kg · průměr ${num(p.avg)} kg`}));
+      const tr=ST.bodyWeightTrend(wp), hc=ST.hourConsistency(wp);
+      const hh=(h)=>Math.floor(h)+":"+String(Math.round((h%1)*60)).padStart(2,"0");
+      const podminky=!hc.enough?""
+        :hc.verdict==="rozhazene"?`<p class="hint" style="color:var(--red)">Vážíš se v hodně rozdílnou dobu, polovina měření se rozchází o ${czSpan(hc.iqr)}. Přes den váha přirozeně stoupá, takže tenhle trend je spíš rozvrh než tělo. Pomohlo by vážit se ráno po probuzení bez ohledu na to, kdy trénuješ.</p>`
+        :hc.verdict==="posouva"?`<p class="hint" style="color:var(--red)">Hodina tréninku se posouvá o ${czSpan(Math.abs(hc.driftPer4w))} za čtyři týdny. Trend váhy to ohýbá stejným směrem, ber ho s rezervou.</p>`
+        :`<p class="hint">Podmínky držíš: vážíš se obvykle kolem ${hh(hc.median)}${hc.iqr<0.1?" a prakticky vždy ve stejnou dobu.":`, polovina měření se vejde do ${czSpan(hc.iqr)}.`}</p>`;
+      const VERD={
+        "roste|roste":"Váha i síla rostou. Nabíráš a jde to do výkonu.",
+        "roste|stoji":"Váha roste, ale síla stojí. Přibývá spíš tuk a voda než sval, uber v jídle.",
+        "roste|klesa":"Váha roste a síla couvá. Tady hledej spíš spánek a regeneraci než jídlo.",
+        "stoji|roste":"Váha drží a síla roste. Při třech sportech to nejlepší, co může být.",
+        "stoji|stoji":"Váha i síla stojí. Když chceš pohyb, musíš změnit jednu stranu: jídlo, nebo zatížení.",
+        "stoji|klesa":"Váha drží, ale síla couvá. To bývá únava, ne jídlo.",
+        "klesa|roste":"Hubneš a sílu držíš. Přesně takhle má hubnutí vypadat.",
+        "klesa|stoji":"Váha klesá, síla stojí. Zatím v pořádku, hlídej, ať síla nezačne padat.",
+        "klesa|klesa":"Váha i síla klesají. Málo jídla nebo málo regenerace, přidej obojí."};
+      const vd=tr.enough&&sd.pct!==null?ST.weightStrengthVerdict(tr.kgPerWeek,sd.pct):null;
+      const wEff=ST.weightContextEffects(roll,CTX).filter(e=>e.verdict!=="malo-dat"&&e.verdict!=="sum");
+      out.push(`<h2 class="sec">Tělesná váha</h2><div class="chart">
+        <h3>Průměr za 14 dní<span>${num(roll[roll.length-1].avg)} kg</span></h3>
+        ${lineChart(pts,{unit:"kg",xLabel:p=>dm(p.t),endLabel:false})}
+        <p class="hint" style="margin-top:6px"><span class="key raw"></span> světlé body jsou jednotlivá vážení, čára je průměr za 14 dní. Čte se jen ta čára, jedno vážení kolísá o kilo i dvě.</p>
+        ${tr.enough?`<p class="hint"><b>Tempo: ${signedNum(tr.kgPerWeek,2)} kg za týden</b> (${tr.n} vážení za ${tr.span} dní).</p>`
+          :`<p class="hint">Na tempo je zatím málo dat: ${tr.n} ${tr.n===1?"vážení":tr.n<5?"vážení":"vážení"} za ${tr.span} dní. Vysloví se od osmi vážení rozložených aspoň do dvou týdnů.</p>`}
+        ${vd?`<p class="hint">${VERD[vd.key]}</p>`:""}
+        ${podminky}
+        ${wEff.length?`<p class="hint">Po těchto aktivitách váha odskakuje od vlastního průměru: ${wEff.map(e=>`${e.label.toLowerCase()} ${signedNum(e.diff,2)} kg`).join(", ")}. Je to voda, ne tuk.</p>`:""}
+        <details><summary>Tabulka</summary><table>${roll.slice().reverse().map(p=>`<tr><td>${fmt(p.t)}</td><td>${num(p.v)} kg · průměr ${num(p.avg)}</td></tr>`).join("")}</table></details></div>`);
+    }
+  }
+
+  /* ---------- 9. rekordy ---------- */
+  const recs=ST.records(all,plan);
+  if(recs.length){
+    const days=(d)=>Math.round((Date.now()-new Date(d))/864e5);
+    out.push(`<h2 class="sec">Osobní rekordy</h2><div class="item"><table class="grid">
+      <tr><th>Cvik</th><th>Odhad maxima</th><th>Z čeho</th><th>Kdy</th></tr>
+      ${recs.map(r=>`<tr><td>${esc(r.name)}</td><td>${Math.round(r.v)} kg</td><td>${kg(r.w)}×${r.reps}</td>
+        <td>${fmt(r.date)}<br><span class="sub2">${days(r.date)===0?"dnes":"před "+days(r.date)+" dny"}</span></td></tr>`).join("")}
+    </table><p class="hint" style="margin-top:9px">Nejlepší odhad maxima ze všech zapsaných sérií mimo lehké týdny. Když je rekord starší než dva cykly, stojí za zvážení změna rozsahu opakování.</p></div>`);
+  }
+
+  v.innerHTML=out.join("");
+  attachTips(v);
 }
 
 /* ============ PLÁN ============ */
 function renderPlan(){
   const v=document.getElementById("view-plan");
-  v.innerHTML=`<div class="banner"><b>Jak to funguje</b>Tři tréninky týdně, střídáš A → B → C. Každý cvik má rozsah opakování. Dokud nejsi na horní hranici ve všech sériích, přidáváš opakování; jakmile ji dáš (a zbývají ti aspoň 1–2 v zásobě), deník sám přidá váhu. Dvakrát po sobě pod spodní hranicí = automatický úkrok o 10 % dolů.</div>
-  <div class="banner" style="background:var(--blue)"><b>Proč tu chybí shyby</b>Vertikální tah za tebe odvede lezení — kdyby byl i v plánu, sešel by se ti na lokti a rameni objem, který se nestihne zregenerovat. Posilovna tady doplňuje to, co jinde nedostaneš: těžký tlak, nohy pod zátěží a práci proti sezení.</div>
-  <div class="banner" style="background:var(--steel)"><b>Když se to nevejde do času</b>Cviky jsou seřazené podle důležitosti. Dochází-li čas nebo síla, škrtej odspoda — poslední dva cviky dne jsou doplňkové. Jediná výjimka: extenzory zápěstí, vnější rotace a face pull nech vždycky, ty tam nejsou kvůli výkonu, ale kvůli loktům a ramenům.</div>`
-  + ORDER.map(d=>`<h2 class="sec">Trénink ${d} — ${PROGRAM[d].title}</h2>`+PROGRAM[d].ex.map((e,i)=>
-    `<details><summary>${i+1}. ${e.name} <span style="font-size:15px;color:var(--steel)">${e.sets}×${e.lo===e.hi?e.lo:e.lo+"–"+e.hi}</span></summary><p>${e.cue}<br>Pauza mezi sériemi: ${Math.round(e.rest/60*10)/10} min · přírůstek ${e.inc} kg</p></details>`).join("")).join("")
+  const isBuiltin=(PLAN().id||0)===0;
+  v.innerHTML=`<h2 class="sec">${esc(PLAN().name)}</h2>
+  ${PLAN().note?`<div class="banner" style="background:var(--steel)"><b>Záměr cyklu</b>${esc(PLAN().note)}</div>`:""}
+  <div class="banner"><b>Jak to funguje</b>Střídáš dny ${ORD().join(" → ")}. Každý cvik má rozsah opakování. Dokud nejsi na horní hranici ve všech sériích, přidáváš opakování; jakmile ji dáš (a zbývají ti aspoň 1–2 v zásobě), deník sám přidá váhu. Dvakrát po sobě pod spodní hranicí = automatický úkrok o 10 % dolů. Poslední týden cyklu je lehký.</div>
+  ${isBuiltin?`<div class="banner" style="background:var(--blue)"><b>Proč tu chybí shyby</b>Vertikální tah za tebe odvede lezení — kdyby byl i v plánu, sešel by se ti na lokti a rameni objem, který se nestihne zregenerovat. Posilovna tady doplňuje to, co jinde nedostaneš: těžký tlak, nohy pod zátěží a práci proti sezení.</div>
+  <div class="banner" style="background:var(--steel)"><b>Když se to nevejde do času</b>Cviky jsou seřazené podle důležitosti. Dochází-li čas nebo síla, škrtej odspoda — poslední dva cviky dne jsou doplňkové. Jediná výjimka: extenzory zápěstí, vnější rotace a face pull nech vždycky, ty tam nejsou kvůli výkonu, ale kvůli loktům a ramenům.</div>`:""}`
+  + ORD().map(d=>`<h2 class="sec">Trénink ${d} — ${esc(DAY(d).title)}</h2>`+DAY(d).ex.map((e,i)=>
+    `<details><summary>${i+1}. ${esc(e.name)} <span style="font-size:15px;color:var(--steel)">${e.sets}×${e.lo===e.hi?e.lo:e.lo+"–"+e.hi}</span></summary><p>${esc(e.cue)}${e.cue?"<br>":""}Pauza mezi sériemi: ${Math.round(e.rest/60*10)/10} min · přírůstek ${e.inc} kg · ${esc(e.group)}${e.track?" · sleduje se v grafu síly":""}</p></details>`).join("")).join("")
   + `<h2 class="sec">Objem za týden</h2><div class="item"><table id="volTable"></table>
   <p class="hint" style="margin-top:9px">Počítáno z plánu, ne z odcvičeného. K číslu u zad si připočti lezení — proto je tu záměrně níž, než by bylo v běžném plánu.</p></div>`
   + `<h2 class="sec">Rozcvičení (8–10 min, každý trénink)</h2>
@@ -386,16 +665,12 @@ function renderPlan(){
    <tr><td>Ostrá bolest nebo bolest v kloubu = konec cviku pro dnešek. Tah ve svalu je v pořádku.</td><td></td></tr>
    <tr><td>Loket po lezení citlivý? Vynech přítahy, extenzory zápěstí nech. Řeší se to týdny, ne dny.</td><td></td></tr>
    <tr><td>Špatně vyspaný? Odcvič polovinu sérií, váhy nech. To pořád vyhrává nad vynecháním.</td><td></td></tr>
-   <tr><td>Každý 7. týden lehčí: −10 % váhy, o sérii míň. Deník ti to připomene.</td><td></td></tr>
+   <tr><td>Cyklus má 4 týdny a poslední je lehký: deník sám nabídne −10 % váhy a o sérii míň a pracovní váhy nechá být.</td><td></td></tr>
    <tr><td>Bílkoviny cca 1,6 g na kilo, spánek 7–8 h. Při třech sportech je regenerace limit, ne trénink.</td><td></td></tr>
   </table></div>
   <p class="hint" style="margin-bottom:24px">Plán je stavěný na postupné zatěžování a hodně prostoru na regeneraci. Pokud tě něco dlouhodobě bolí nebo máš zdravotní omezení, probeř to nejdřív s lékařem nebo fyzioterapeutem.</p>`;
-  const GROUP={squat:"Nohy",nordic:"Nohy",split:"Nohy",legpress:"Nohy",hip:"Nohy",dead:"Nohy",
-    bench:"Prsa",incline:"Prsa",fly:"Prsa",ohp:"Ramena",lat:"Ramena",face:"Ramena",extrot:"Ramena",
-    row:"Záda",cablerow:"Záda",chestrow:"Záda",tri:"Paže",triext:"Paže",wrist:"Paže",
-    pallof:"Core",deadbug:"Core",abwheel:"Core"};
   const vol={};
-  ORDER.forEach(d=>PROGRAM[d].ex.forEach(e=>{const g=GROUP[e.id]||"Ostatní";vol[g]=(vol[g]||0)+e.sets;}));
+  ORD().forEach(d=>DAY(d).ex.forEach(e=>{const g=e.group||"Ostatní";vol[g]=(vol[g]||0)+e.sets;}));
   const total=Object.values(vol).reduce((a,b)=>a+b,0);
   const t=v.querySelector("#volTable");
   t.innerHTML=Object.entries(vol).sort((a,b)=>b[1]-a[1]).map(([g,n])=>
@@ -408,25 +683,56 @@ const isoDay=d=>{const x=new Date(d);return x.getFullYear()+"-"+String(x.getMont
 function renderData(){
   const v=document.getElementById("view-data");
   const first=S.sessions.length?S.sessions[0].date:null, last=S.sessions.length?S.sessions[S.sessions.length-1].date:null;
-  const monthAgo=new Date();monthAgo.setDate(monthAgo.getDate()-30);
-  const inMonth=S.sessions.filter(s=>new Date(s.date)>=monthAgo).length;
-  v.innerHTML=`<h2 class="sec">Kde leží tvoje data</h2>
+  const cyc=S.cycle, cStart=cyc.start, cEnd=cycleEnd(cStart), wk=cycleWeek(cStart), over=cycleEnded(cStart);
+  const inCycle=S.sessions.filter(x=>new Date(x.date)>=new Date(cStart+"T00:00:00"));
+  const dl=inCycle.filter(x=>x.deload).length;
+  v.innerHTML=`<h2 class="sec">Cyklus</h2>
+  <div class="item"><table>
+    <tr><td>Běžící cyklus</td><td>č. ${cyc.n} · ${over?"po konci":"týden "+wk+" ze "+CYCLE_WEEKS}</td></tr>
+    <tr><td>Od – do</td><td>${fmt(cStart)} – ${fmt(cEnd)}</td></tr>
+    <tr><td>Tréninků v cyklu</td><td>${inCycle.length}${dl?" (z toho "+dl+" "+plural(dl,"lehký","lehké","lehkých")+")":""}</td></tr>
+    <tr><td>Lehký týden</td><td>${over?"proběhl":(wk===CYCLE_WEEKS?"probíhá":"vyjde na "+CYCLE_WEEKS+". týden")}</td></tr>
+  </table>
+  <div class="row" style="margin:10px 0 0"><button class="bigbtn${over?"":" ghost"}" id="newCycleBtn">Začít nový cyklus</button></div>
+  <p class="hint" style="margin-top:9px">Na konci cyklu vyexportuj data níž, nahraj je Claudovi a s novým plánem klepni sem. Historie i pracovní váhy zůstanou, jen se počítadlo týdnů vrátí na začátek.</p></div>
+
+  <h2 class="sec">Nastavení</h2>
+  <div class="item">
+    <div class="setrow"><div><b>Vážení před tréninkem</b><span class="sub2">Přidá do tréninku pole na váhu a do Progresu graf s klouzavým průměrem.</span></div>
+      <button class="toggle" id="tgWeigh" aria-pressed="${setting("weighIn")}">${setting("weighIn")?"Zapnuto":"Vypnuto"}</button></div>
+    <p class="hint" style="margin-top:9px">Má smysl, jen když se vážíš pokaždé za stejných podmínek. Když chodíš jednou ráno, jednou odpoledne a jednou večer, číslo skáče o víc, než kolik dělá skutečná změna. Deník si hlídá hodinu tréninků a napíše ti, až se rozejdou.</p>
+  </div>
+
+  <h2 class="sec">Kde leží tvoje data</h2>
   <div class="item"><table>
     <tr><td>Server (Postgres)</td><td><span class="sync">${Sync.label()}</span></td></tr>
     <tr><td>Kopie v tomhle prohlížeči <span style="color:var(--steel)">(pro offline)</span></td><td>ano</td></tr>
     <tr><td>Uloženo tréninků</td><td>${S.sessions.length}${first?" ("+fmt(first)+" – "+fmt(last)+")":""}</td></tr>
-    <tr><td>Za posledních 30 dní</td><td>${inMonth}</td></tr>
   </table></div>
 
   <h2 class="sec">Export pro rozbor v Claudovi</h2>
   <div class="item">
-    <div class="range"><label>Od <input type="date" id="expFrom" value="${isoDay(monthAgo)}"></label><label>Do <input type="date" id="expTo" value="${isoDay(new Date())}"></label>
-      <button class="bigbtn ghost" style="flex:0 0 auto;font-size:15px;padding:8px 12px" id="expAll">Celá historie</button></div>
+    <div class="range"><label>Od <input type="date" id="expFrom" value="${cStart}"></label><label>Do <input type="date" id="expTo" value="${isoDay(new Date())}"></label></div>
+    <div class="row" style="margin:6px 0 0"><button class="bigbtn ghost" style="font-size:15px;padding:8px" id="expCycle">Tenhle cyklus</button><button class="bigbtn ghost" style="font-size:15px;padding:8px" id="expAll">Celá historie</button></div>
     <div class="row" style="margin:10px 0 6px"><a class="bigbtn linkbtn" id="dlTxt" href="#">Rozbor (TXT)</a><a class="bigbtn ghost linkbtn" id="dlCsv" href="#">CSV</a><a class="bigbtn ghost linkbtn" id="dlJson" href="#">JSON</a></div>
     <div class="row" style="margin:0"><button class="bigbtn ghost" id="expC">Zkopírovat rozbor do schránky</button></div>
-    <p class="hint" style="margin-top:9px">TXT je připravený text s otázkami pro Clauda — stačí ho nahrát nebo vložit do chatu. CSV má jednu řádku na sérii (hodí se do tabulky i pro hlubší analýzu). JSON je kompletní záloha, dá se zpět načíst.</p>
+    <p class="hint" style="margin-top:9px">Výchozí rozsah je běžící cyklus. TXT je připravený text s otázkami pro Clauda, stačí ho nahrát nebo vložit do chatu; nese číslo cyklu, pracovní váhy i označení lehkých tréninků. CSV má jednu řádku na sérii včetně sloupce <b>lehky_tyden</b>. JSON je kompletní záloha, dá se zpět načíst.</p>
   </div>
   <textarea id="io" placeholder="Sem se vypíše rozbor pro Clauda. Můžeš sem taky vložit obsah zálohy (JSON) a načíst ji tlačítkem níž."></textarea>
+
+  <h2 class="sec">Nový plán od Clauda</h2>
+  <div class="item">
+    <table>
+      <tr><td>Běžící plán</td><td>${esc(PLAN().name)}</td></tr>
+      <tr><td>Cviků v plánu</td><td>${ORD().reduce((a,x)=>a+DAY(x).ex.length,0)} v ${ORD().length} dnech</td></tr>
+      <tr><td>Nasazen</td><td>${PLAN().savedAt?fmt(PLAN().savedAt):"výchozí plán deníku"}</td></tr>
+    </table>
+    <p class="hint" style="margin-top:9px">Textový export dole končí návodem, v jakém tvaru má Claude plán poslat. Jeho odpověď sem vlož nebo nahraj jako soubor.</p>
+    <textarea id="planIo" placeholder="Sem vlož JSON plánu od Clauda."></textarea>
+    <div class="row" style="margin:0"><button class="bigbtn ghost" style="font-size:15px;padding:9px" id="planFileBtn">Načíst ze souboru</button><button class="bigbtn" style="font-size:15px;padding:9px" id="planCheck">Zkontrolovat plán</button></div>
+    <input type="file" id="planFile" accept=".json,application/json" hidden>
+  </div>
+  ${planPreviewHTML()}
 
   <h2 class="sec">Záloha a obnova</h2>
   <div class="row"><button class="bigbtn ghost" id="impF">Načíst ze souboru</button><button class="bigbtn ghost" id="imp">Načíst z textu</button></div>
@@ -447,6 +753,23 @@ function renderData(){
   };
   from.onchange=to.onchange=links; links();
   v.querySelector("#expAll").onclick=()=>{from.value="";to.value="";links();toast("Export zahrne celou historii.");};
+  v.querySelector("#expCycle").onclick=()=>{from.value=cStart;to.value=isoDay(new Date());links();toast("Export zahrne běžící cyklus.");};
+  v.querySelector("#newCycleBtn").onclick=newCycle;
+  v.querySelector("#tgWeigh").onclick=()=>{
+    S.settings=Object.assign({},S.settings,{weighIn:!setting("weighIn")});
+    save(); renderTrain(); renderStats(); renderData();
+    toast(setting("weighIn")?"Vážení zapnuto. Pole najdeš v tréninku.":"Vážení vypnuto. Zapsaná data zůstávají.");
+  };
+  const planIo=v.querySelector("#planIo"); planIo.value=planText;
+  planIo.oninput=()=>{planText=planIo.value;};
+  v.querySelector("#planCheck").onclick=()=>{
+    if(!planIo.value.trim()){toast("Nejdřív vlož plán.");return;}
+    checkPlan(planIo.value);
+  };
+  v.querySelector("#planFileBtn").onclick=()=>v.querySelector("#planFile").click();
+  v.querySelector("#planFile").onchange=async ev=>{const f=ev.target.files[0];if(!f)return;checkPlan(await f.text());};
+  const pa=v.querySelector("#planApply");
+  if(pa){pa.onclick=applyPlanNow; v.querySelector("#planCancel").onclick=cancelPlan;}
   v.querySelector("#expC").onclick=async()=>{
     try{
       const q=new URLSearchParams();if(from.value)q.set("from",from.value);if(to.value)q.set("to",to.value);
@@ -463,8 +786,8 @@ function renderData(){
   v.querySelector("#fileIn").onchange=async ev=>{const f=ev.target.files[0];if(!f)return;
     try{importObj(JSON.parse(await f.text()));}catch(e){toast("Tohle není platná záloha.");}};
   v.querySelector("#imp").onclick=()=>{try{importObj(JSON.parse(io.value));}catch(e){toast("Tohle není platná záloha.");}};
-  v.querySelector("#rst").onclick=()=>{if(confirm("Opravdu smazat celou historii i váhy? Ze serveru i z telefonu.")){
-    S=emptyState();save();renderAll();toast("Smazáno.");}};
+  v.querySelector("#rst").onclick=()=>{if(confirm("Opravdu smazat celou historii i váhy? Ze serveru i z telefonu. Nasazený plán zůstane.")){
+    S=Object.assign(emptyState(),{plan:S.plan,plans:S.plans});save();renderAll();toast("Smazáno.");}};
   v.querySelector("#logoutBtn").onclick=logout;
   const standalone=window.matchMedia("(display-mode: standalone)").matches||navigator.standalone;
   v.querySelector("#installHint").textContent=standalone?"Běží jako nainstalovaná aplikace.":"Tip: v prohlížeči zvol „Přidat na plochu“ — deník se pak otevírá jako aplikace a načte se i bez signálu.";
@@ -483,6 +806,10 @@ document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>{
 async function boot(){
   try{await load();}
   catch(e){if(e.message==="unauthorized")return; toast("Nepodařilo se načíst data: "+e.message);return;}
+  if(!S.plan) S.plan=BUILTIN_PLAN;
+  if(!S.plans) S.plans={0:BUILTIN_PLAN};
+  if(!S.settings) S.settings={};
+  if(!S.cycle||!S.cycle.start){S.cycle={n:1,start:todayISO()};save();}
   showApp(); renderAll();
 }
 (async()=>{

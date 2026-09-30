@@ -70,7 +70,7 @@ nav button[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--ink)
 .picker{display:flex;gap:6px;margin:12px 0}
 .picker button{flex:1;padding:9px 0;border:1px solid var(--line);background:var(--card);border-radius:3px;font-family:var(--display);font-size:19px;text-transform:uppercase;cursor:pointer}
 .picker button[aria-pressed="true"]{background:var(--ink);color:var(--paper);border-color:var(--ink)}
-.bigbtn{width:100%;padding:15px;border:0;border-radius:3px;background:var(--blue);color:#fff;font-family:var(--display);font-size:23px;letter-spacing:.05em;text-transform:uppercase;cursor:pointer}
+.bigbtn{width:100%;min-width:0;padding:15px;border:0;border-radius:3px;background:var(--blue);color:#fff;font-family:var(--display);font-size:23px;letter-spacing:.05em;text-transform:uppercase;cursor:pointer;overflow-wrap:anywhere}
 .bigbtn.ghost{background:none;color:var(--ink);border:1px solid var(--ink)}
 .bigbtn[disabled]{opacity:.4}
 .row{display:flex;gap:8px;margin:14px 0}
@@ -93,8 +93,8 @@ h2.sec{font-size:15px;letter-spacing:.12em;text-transform:uppercase;color:var(--
 .item td{padding:3px 0;border-top:1px solid var(--line);vertical-align:top}
 .item td:last-child{text-align:right;font-variant-numeric:tabular-nums;color:var(--steel)}
 .chart{background:var(--card);border:1px solid var(--line);border-radius:3px;padding:11px 13px;margin:8px 0}
-.chart h3{font-size:16px;text-transform:uppercase;display:flex;justify-content:space-between;align-items:baseline}
-.chart h3 span{font-family:var(--body);font-size:12px;font-weight:500;color:var(--steel)}
+.chart h3{font-size:16px;text-transform:uppercase;display:flex;justify-content:space-between;align-items:baseline;gap:10px}
+.chart h3 span{font-family:var(--body);font-size:12px;font-weight:500;color:var(--steel);white-space:nowrap;flex:0 0 auto}
 .empty{color:var(--steel);font-size:13.5px;padding:18px 0}
 textarea{width:100%;height:150px;border:1px solid var(--line);border-radius:3px;padding:9px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;background:var(--card)}
 details{border-top:1px solid var(--line);padding:9px 0}
@@ -117,3 +117,59 @@ details p{font-size:13px;color:var(--steel);margin:6px 0 0}
 .linkbtn{display:block;text-align:center;text-decoration:none}
 .range{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0}
 .range input[type=date]{border:1px solid var(--line);border-radius:3px;padding:7px 9px;background:#fff;font-size:14px}
+.cycle{display:flex;align-items:center;gap:8px;margin:0 0 10px;padding:7px 10px;background:var(--card);border:1px solid var(--line);border-radius:3px;font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--steel)}
+.cycle span{font-weight:600;color:var(--ink)}
+.cycle button{margin-left:auto;background:none;border:1px solid var(--line);border-radius:3px;padding:5px 9px;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--steel);cursor:pointer;white-space:nowrap}
+.cycle button:active{background:var(--line)}
+.flag{display:inline-block;vertical-align:middle;background:var(--yellow);color:var(--ink);font-family:var(--body);font-size:10px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;padding:2px 6px;border-radius:2px}
+
+/* --- grafy: tenké značky, vlasová mřížka, jedna barva na sérii --- */
+.chart{position:relative}
+.ch-grid{stroke:var(--line);stroke-width:1;shape-rendering:crispEdges}
+.ch-line{fill:none;stroke:var(--blue);stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+.ch-dot{fill:var(--blue);stroke:var(--card);stroke-width:2}
+.ch-bar{fill:var(--blue)}
+.ch-ref{stroke:var(--steel);stroke-width:2}
+.ch-mark{fill:var(--steel)}
+.ch-txt{fill:var(--steel);font-family:var(--body);font-size:10px;font-variant-numeric:tabular-nums}
+.ch-val{fill:var(--ink);font-family:var(--body);font-size:11px;font-weight:600;font-variant-numeric:tabular-nums}
+.ch-hit{fill:transparent}
+.ctip{position:absolute;z-index:5;transform:translate(-50%,-100%);background:var(--ink);color:var(--paper);font-size:11.5px;line-height:1.3;padding:5px 8px;border-radius:3px;pointer-events:none;white-space:nowrap;max-width:94%;overflow:hidden;text-overflow:ellipsis}
+.key{display:inline-block;width:9px;height:4px;border-radius:1px;background:var(--steel);vertical-align:middle}
+.key.ref{width:2px;height:11px}
+.chart details{border-top:1px solid var(--line);margin-top:8px;padding-bottom:0}
+.chart details summary{font-family:var(--body);font-size:11.5px;font-weight:500;text-transform:none;letter-spacing:0;color:var(--steel)}
+
+/* --- dlaždice souhrnu --- */
+.tiles{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:8px 0}
+.tile{background:var(--card);border:1px solid var(--line);border-radius:3px;padding:9px 11px;min-width:0}
+.tile small{display:block;font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--steel);overflow-wrap:anywhere}
+.tile b{display:block;font-family:var(--display);font-size:27px;line-height:1.1;margin:3px 0 1px;overflow-wrap:anywhere}
+.tile span{display:block;font-size:11.5px;color:var(--steel)}
+.arw{font-style:normal;color:var(--steel)}
+.arw.up{color:var(--green)}
+.arw.down{color:var(--red)}
+
+/* --- stavové štítky: barva nikdy nenese význam sama, vždy je u ní slovo --- */
+.chip{display:inline-block;font-size:10.5px;font-weight:600;padding:2px 6px;border-radius:2px;white-space:nowrap;background:var(--line);color:var(--steel)}
+.chip.ok{background:var(--green);color:#fff}
+.chip.warn{background:var(--yellow);color:var(--ink)}
+.chip.bad{background:var(--red);color:#fff}
+table.grid th{text-align:left;font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--steel);font-weight:600;padding:0 0 5px;border:0}
+table.grid th:not(:first-child),table.grid td:not(:first-child){text-align:right}
+table.grid td{vertical-align:middle}
+.sub2{font-size:11px;color:var(--steel)}
+/* automatická šířka sloupců: nic nepřeteče, protože dlouhé názvy se zalomí */
+table.grid td,table.grid th{padding:5px 0 5px 7px;overflow-wrap:break-word}
+table.grid td:first-child,table.grid th:first-child{padding-left:0}
+table.grid td:not(:first-child){white-space:nowrap}
+table.grid td.wrap{white-space:normal}
+.item details{border-top:1px solid var(--line);margin-top:6px}
+.item details summary{font-family:var(--body);font-size:12px;font-weight:500;text-transform:none;letter-spacing:0;color:var(--steel)}
+.ch-raw{fill:var(--blue);opacity:.3}
+.setrow{display:flex;align-items:flex-start;gap:10px}
+.setrow b{display:block;font-weight:600}
+.setrow .sub2{display:block;margin-top:2px}
+.toggle{flex:0 0 auto;margin-left:auto;border:1px solid var(--line);background:#fff;border-radius:3px;padding:7px 11px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--steel);cursor:pointer;white-space:nowrap}
+.toggle[aria-pressed="true"]{background:var(--green);border-color:var(--green);color:#fff;font-weight:600}
+.key.raw{width:6px;height:6px;border-radius:50%;background:var(--blue);opacity:.35}
