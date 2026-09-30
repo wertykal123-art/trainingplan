@@ -7,7 +7,7 @@ klepnutím vyexportuješ historii pro rozbor v Claudovi.
 - **Cyklus** – čtyři týdny, poslední je lehký (deload). Na konci vyexportuješ data, Claude napíše nový plán a ty ho nahraješ.
 - **Plán jako data** – cviky, série, přírůstky i pokyny jdou nahrát jako JSON. Kód se kvůli novému plánu nemění.
 - **Trénink** – zápis sérií (váha × opakování × zásoba), pauzy, automatická progrese vah
-- **Historie / Progres** – odcvičené tréninky, odhad 1RM, objem po týdnech, vliv lezení a capoeiry
+- **Historie / Progres** – odcvičené tréninky a devět pohledů na to, jak trénink jde
 - **Plán** – celý program s pokyny ke cvikům
 - **Data** – export TXT (rozbor pro Clauda), CSV (řádek na sérii), JSON (záloha), import zálohy
 - **Přihlášení** – jedno heslo, cookie na 90 dní, ochrana proti hádání hesla
@@ -30,6 +30,33 @@ klepnutím vyexportuješ historii pro rozbor v Claudovi.
 5. Otevři adresu v telefonu, přihlas se a zvol **Přidat na plochu** (Safari: Sdílet → Přidat na plochu; Chrome: menu → Přidat na plochu).
 
 Tabulky si server vytvoří sám při startu. Bez `APP_PASSWORD` nebo `DATABASE_URL` server nenastartuje.
+
+## Co ukazuje Progres
+
+| Oddíl | Na co odpovídá |
+|-------|----------------|
+| Souhrn cyklu | Jak jde tenhle cyklus proti předchozím čtyřem týdnům. Protože cyklus zatím běží, srovnává se tempo na týden, ne součty. |
+| Odhad maxima | Vývoj síly u sledovaných cviků, včetně tempa v kg za týden a počtu měření. |
+| Co se hýbe a co stojí | Každý cvik se stavem *roste / drží / stagnuje / couvá*. Stagnace = tři a víc tréninků bez přidání váhy i opakování. |
+| Objem po týdnech | Náběh zátěže a upozornění na skok přes třetinu. |
+| Série podle svalových skupin | Kolik sérií týdně padne na kterou skupinu, s ryskou předchozího období. |
+| Zásoba a únava | Vývoj průměrné zásoby opakování a slovní výklad, jestli přituhuje. |
+| Co ti bere lezení a capoeira | Srovnání zásoby podle toho, co bylo v posledních 48 hodinách. |
+| Docházka | Obvyklá mezera mezi tréninky, nejdelší pauza, rozložení po dnech. |
+| Osobní rekordy | Nejlepší odhad maxima u sledovaných cviků a jak je starý. |
+
+Statistiky jsou schválně opatrné:
+
+- Lehké týdny se nepočítají do síly, rekordů ani do trendu zásoby. Do objemu a docházky ano.
+- U každého srovnání je vidět, z kolika tréninků vzniklo.
+- Rozdíl mezi skupinami (třeba „po lezení“ proti „bez lezení“) se vysloví, teprve když
+  přesáhne kolísání mezi tréninky, a k tomu jsou potřeba aspoň čtyři tréninky na každé straně.
+  Jinak tam stojí „zatím málo dat“ nebo „nerozeznatelné od běžného kolísání“.
+- Grafy mají jednu barvu na řadu, hodnoty jdou přečíst i v přiložené tabulce a stavy
+  mají vždy slovo, ne jen barvu.
+
+Stejný souhrn jde i do textového exportu, takže Claude dostane hotové signály
+(co stagnuje, jaké je tempo síly, co dělá lezení) a nemusí je dopočítávat.
 
 ## Měsíční cyklus a lehký týden
 
@@ -119,7 +146,7 @@ cp .env.example .env      # doplň DATABASE_URL, APP_PASSWORD, SESSION_SECRET
 npm install
 set -a; . ./.env; set +a
 npm start                 # http://localhost:3000
-npm test                  # jednotkové testy plánu, cyklu, exportu a přihlášení
+npm test                  # jednotkové testy statistik, plánu, cyklu, exportu a přihlášení
 ```
 
 ## Struktura
@@ -132,6 +159,8 @@ src/export.js     TXT / CSV / JSON export
 shared/program.js tréninkový program (sdílený s prohlížečem)
 shared/cycle.js   čtyřtýdenní cyklus a výpočet lehkého týdne
 shared/plan.js    kontrola nahraného plánu, porovnání se stávajícím, přenos vah
+shared/stats.js   výpočty pro Progres a pro souhrn v exportu
+public/charts.js  malé SVG grafy (čára, sloupce, vodorovné pruhy, bublina s hodnotou)
 public/           PWA: index.html, app.js, style.css, sw.js, manifest, ikony
 ```
 

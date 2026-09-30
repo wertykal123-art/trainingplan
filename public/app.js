@@ -1,6 +1,8 @@
 "use strict";
 import { CTX } from "/shared/program.js";
 import { BUILTIN_PLAN, validatePlan, diffPlans, exerciseOf } from "/shared/plan.js";
+import * as ST from "/shared/stats.js";
+import { lineChart, columnChart, hbarChart, attachTips } from "/charts.js";
 import { CYCLE_WEEKS, cycleWeek, isDeloadWeek, cycleEnded, cycleEnd, deloadWeight, deloadSets, todayISO } from "/shared/cycle.js";
 
 const PLATES=[{w:25,c:"#B23A2E"},{w:20,c:"#1B4A8B"},{w:15,c:"#D9A400"},{w:10,c:"#2E7D4F"},{w:5,c:"#F5F4F1"},{w:2.5,c:"#B23A2E"},{w:1.25,c:"#9AA1AE"}];
@@ -121,7 +123,6 @@ async function logout(){
 
 /* ============ POMOCNÉ ============ */
 const round=(v,st)=>Math.max(0,Math.round(v/st)*st);
-const e1rm=(w,r,rir)=>w>0?w*(1+(r+(rir||0))/30):0;
 function plateList(total,barW){
   if(!barW||total<=barW) return null;
   let side=(total-barW)/2, out=[];
@@ -409,55 +410,173 @@ function renderHistory(){
 }
 
 /* ============ PROGRES ============ */
+const dm=(d)=>{const x=new Date(d);return x.getDate()+"."+(x.getMonth()+1)+".";};
+const kg=(v)=>Math.round(v).toLocaleString("cs-CZ");
+const signed=(v,dec=0)=>(v>0?"+":v<0?"−":"")+Math.abs(v).toFixed(dec).replace(".",",");
+/* číslo s desetinnou čárkou, nuly za čárkou se zahazují */
+const num=(v,dec=1)=>(Math.round(v*10**dec)/10**dec).toLocaleString("cs-CZ",{maximumFractionDigits:dec});
+const signedNum=(v,dec=1)=>(v>0?"+":v<0?"−":"")+num(Math.abs(v),dec);
+const czDays=(v)=>{const r=Math.round(v*10)/10; return num(r)+" "+(r===1?"den":Number.isInteger(r)&&r<5?"dny":"dne");};
+
+/* dlaždice: hodnota, pod ní rozdíl proti předchozímu stejně dlouhému oknu.
+   Šipka dostane barvu jen tam, kde má směr jasný význam. */
+function tile(label,value,sub,delta){
+  const arrow=delta&&delta.show?`<i class="arw ${delta.good===true?"up":delta.good===false?"down":""}">${delta.v>0?"▲":delta.v<0?"▼":"▬"}</i> `:"";
+  return `<div class="tile"><small>${label}</small><b>${value}</b><span>${arrow}${sub}</span></div>`;
+}
+
 function renderStats(){
   const v=document.getElementById("view-stats");
-  if(S.sessions.length<2){v.innerHTML='<p class="empty">Graf se objeví po druhém tréninku. Sleduje odhadované maximum na 1 opakování — tedy sílu, ne jen zvednutou váhu.</p>';return;}
-  let track=[];
-  for(const d of ORD()) for(const e of DAY(d).ex) if(e.track) track.push([d,e.id,e.name]);
-  if(!track.length) track=ORD().map(d=>DAY(d).ex[0]).filter(Boolean).map((e,i)=>[ORD()[i],e.id,e.name]);
-  v.innerHTML='<h2 class="sec">Odhad maxima na 1 opakování</h2><p class="hint" style="margin:-4px 0 8px">Lehké týdny se do odhadu nepočítají, aby graf ukazoval sílu a ne plánovaný výpadek.</p>';
-  track.forEach(([day,id,name])=>{
-    const pts=[];
-    S.sessions.forEach(s=>{if(s.day!==day||s.deload)return;const e=s.ex.find(x=>x.id===id);if(!e)return;
-      const best=Math.max(...e.sets.map(x=>e1rm(x.w,x.reps,x.rir)));if(best>0)pts.push({t:s.date,v:best});});
-    if(pts.length<2)return;
-    const first=pts[0].v,last=pts[pts.length-1].v,d=last-first;
-    v.insertAdjacentHTML("beforeend",`<div class="chart"><h3>${name}<span>${Math.round(last)} kg ${d>=0?"▲ +":"▼ "}${Math.round(Math.abs(d))}</span></h3>${spark(pts)}</div>`);
-  });
-  const weeks={};
-  S.sessions.forEach(s=>{const w=Math.floor((new Date(s.date)-new Date(S.sessions[0].date))/6048e5);
-    weeks[w]=(weeks[w]||0)+s.ex.reduce((a,e)=>a+e.sets.reduce((b,x)=>b+(x.w||0)*x.reps,0),0);});
-  const ks=Object.keys(weeks).map(Number).sort((a,b)=>a-b);
-  v.insertAdjacentHTML("beforeend",`<h2 class="sec">Celkový objem po týdnech</h2><div class="chart">${
-    spark(ks.map(k=>({t:k,v:weeks[k]})),true)}<p class="hint" style="margin-top:8px">Objem = váha × opakování, sečteno přes celý týden. Roste-li plynule, jsi na dobré cestě; skokový nárůst je nejčastější příčina bolavých kloubů.</p></div>`);
-  const rows=[];
-  CTX.forEach(c=>{
-    const on=[],off=[];
-    S.sessions.forEach(s=>{
-      const q=s.ex.reduce((a,e)=>a+e.sets.reduce((b,x)=>b+(x.rir||0),0),0)/Math.max(1,s.ex.reduce((a,e)=>a+e.sets.length,0));
-      ((s.ctx&&s.ctx[c.k])?on:off).push(q);
-    });
-    if(on.length>=2&&off.length>=2){
-      const avg=a=>a.reduce((x,y)=>x+y,0)/a.length;
-      const d=avg(on)-avg(off);
-      rows.push(`<tr><td>${c.label} předtím <span style="color:var(--steel)">(${on.length}× / ${off.length}×)</span></td><td>${
-        d>0.25?"těžší série":d<-0.25?"lehčí série":"beze změny"} · ${d>0?"+":""}${d.toFixed(1)}</td></tr>`);
+  const all=S.sessions;
+  if(all.length<2){v.innerHTML='<p class="empty">Statistiky se rozjedou po druhém uloženém tréninku. Pak tu uvidíš sílu po cvicích, objem, únavu i to, co ti bere lezení a capoeira.</p>';return;}
+  const plan=PLAN(), out=[];
+
+  /* ---------- 1. souhrn cyklu ----------
+     Běžící cyklus se nedá poměřovat s celým minulým oknem, dokud neskončí.
+     Proto se porovnává tempo na týden, které je srovnatelné kdykoli. */
+  const cStart=ST.dayStart(S.cycle.start), DAYMS=864e5;
+  const cycleEndMs=+cStart+CYCLE_WEEKS*7*DAYMS;
+  const curTo=Math.min(+ST.dayStart(new Date())+DAYMS,cycleEndMs);
+  const elapsed=Math.max(1,Math.round((curTo-+cStart)/DAYMS)), curWeeks=elapsed/7;
+  const cur=ST.inWindow(all,cStart,new Date(curTo));
+  const prev=ST.inWindow(all,new Date(+cStart-CYCLE_WEEKS*7*DAYMS),cStart);
+  const a=ST.summary(cur), b=ST.summary(prev), sd=ST.strengthDelta(cur,prev,plan);
+  const hasPrev=b.n>0;
+  const rate=(x,w)=>w>0?x/w:0;
+  const dPct=(x,y)=>y>0?(x-y)/y*100:0;
+  const dTr=dPct(rate(a.n,curWeeks),rate(b.n,CYCLE_WEEKS));
+  const dVol=dPct(rate(a.volume,curWeeks),rate(b.volume,CYCLE_WEEKS));
+  const dRir=(a.meanRir!==null&&b.meanRir!==null)?a.meanRir-b.meanRir:null;
+  out.push(`<h2 class="sec">Cyklus ${S.cycle.n} · ${cycleEnded(S.cycle.start)?"po konci":"týden "+cycleWeek(S.cycle.start)+" ze "+CYCLE_WEEKS}</h2>
+  <div class="tiles">
+    ${tile("Tréninků",a.n,`${hasPrev?signed(dTr)+" % · ":""}${rate(a.n,curWeeks).toFixed(1).replace(".",",")} týdně${a.deloads?" · "+a.deloads+" lehkých":""}`,
+      {show:hasPrev,v:dTr,good:dTr>2?true:dTr<-2?false:null})}
+    ${tile("Objem",kg(a.volume)+" kg",`${hasPrev?signed(dVol)+" % · ":""}${kg(rate(a.volume,curWeeks))} kg týdně`,{show:hasPrev,v:dVol,good:null})}
+    ${tile("Zásoba v opakováních",a.meanRir===null?"—":a.meanRir.toFixed(1).replace(".",","),
+      dRir!==null?`${signed(dRir,1)} proti minulým 4 týdnům`:`z ${a.sets} sérií`,{show:dRir!==null,v:dRir||0,good:null})}
+    ${tile("Síla",sd.pct===null?"—":signed(sd.pct,1)+" %",
+      sd.pct===null?"chybí srovnání s minulým obdobím":`průměr přes ${sd.lifts} ${sd.lifts===1?"cvik":sd.lifts<5?"cviky":"cviků"}`,
+      {show:sd.pct!==null,v:sd.pct||0,good:sd.pct>0.5?true:sd.pct<-0.5?false:null})}
+  </div>
+  <p class="hint">Cyklus běží ${elapsed} ${elapsed===1?"den":elapsed<5?"dny":"dní"} z ${CYCLE_WEEKS*7}, proto se srovnává tempo na týden, ne součet. Protějšek jsou předchozí čtyři týdny${hasPrev?` (${b.n} tréninků)`:", zatím bez dat"}. Síla je průměrná změna odhadu maxima u sledovaných cviků; lehké týdny se do ní nepočítají.</p>`);
+
+  /* ---------- 2. síla po cvicích ---------- */
+  const lifts=ST.trackedLifts(plan).map(l=>({...l,pts:ST.liftSeries(all,l.day,l.id)})).filter(l=>l.pts.length>=2);
+  if(lifts.length){
+    out.push('<h2 class="sec">Odhad maxima na 1 opakování</h2>');
+    for(const l of lifts){
+      const pts=l.pts.map(p=>({...p,tip:fmt(p.t)+": "+Math.round(p.v)+" kg"}));
+      const first=pts[0].v,last=pts[pts.length-1].v, tr=ST.slopePerDay(pts);
+      const perWeek=tr?tr.slope*7:null;
+      const tempo=perWeek===null?"":`${signedNum(perWeek)} kg za týden · ${pts.length} měření${tr.r2<0.3?" · hodně rozkolísané":""}`;
+      out.push(`<div class="chart"><h3>${esc(l.name)}<span>${Math.round(last)} kg · ${signed(last-first)} kg</span></h3>
+        ${lineChart(pts,{unit:"kg",xLabel:p=>dm(p.t),endLabel:false})}
+        <p class="hint" style="margin-top:6px">${tempo}</p>
+        <details><summary>Tabulka</summary><table>${pts.map(p=>`<tr><td>${fmt(p.t)}</td><td>${Math.round(p.v)} kg</td></tr>`).join("")}</table></details></div>`);
     }
-  });
-  if(rows.length) v.insertAdjacentHTML("beforeend",`<h2 class="sec">Jak se to pere se zbytkem života</h2><div class="item"><table>${rows.join("")}</table>
-    <p class="hint" style="margin-top:9px">Číslo je rozdíl v průměrné zásobě opakování. Kladné = po téhle aktivitě ti série přijdou těžší. Pár desetin je šum, půl opakování a víc už stojí za úpravu rozvrhu.</p></div>`);
-  if(!v.querySelector(".chart"))v.innerHTML='<p class="empty">Zatím málo dat.</p>';
-}
-function spark(pts,bars){
-  const W=300,H=72,pad=6;
-  const vs=pts.map(p=>p.v),mn=Math.min(...vs),mx=Math.max(...vs),rg=(mx-mn)||1;
-  const x=i=>pad+i*(W-2*pad)/Math.max(1,pts.length-1), y=v=>H-pad-((v-mn)/rg)*(H-2*pad);
-  if(bars){const bw=(W-2*pad)/pts.length-3;
-    return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" role="img">${pts.map((p,i)=>
-      `<rect x="${pad+i*((W-2*pad)/pts.length)}" y="${Math.min(H-pad-2,y(p.v))}" width="${Math.max(4,bw)}" height="${Math.max(2,H-pad-y(p.v))}" fill="#1B4A8B" opacity=".85"/>`).join("")}</svg>`;}
-  return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" role="img" preserveAspectRatio="none">
-    <polyline fill="none" stroke="#1B4A8B" stroke-width="2" points="${pts.map((p,i)=>x(i)+","+y(p.v)).join(" ")}"/>
-    ${pts.map((p,i)=>`<circle cx="${x(i)}" cy="${y(p.v)}" r="2.5" fill="#15171C"/>`).join("")}</svg>`;
+    out.push('<p class="hint">Odhad maxima počítá z váhy, opakování i zásoby, takže roste i tehdy, když přidáš jen opakování. Lehké týdny jsou vynechané.</p>');
+  }
+
+  /* ---------- 3. co se hýbe a co stojí ---------- */
+  const prog=ST.exerciseProgress(all,plan,S.weights);
+  if(prog.length){
+    const chip={roste:["ok","roste"],drzi:["neutral","drží"],stagnuje:["warn","stagnuje"],couva:["bad","couvá"],"malo-dat":["neutral","málo dat"]};
+    const row=(r)=>{const[c,t]=chip[r.state];
+      return `<tr><td>${esc(r.day)} · ${esc(r.name)}<br><span class="sub2">${r.n}× zapsáno</span></td>
+        <td>${r.now>0?kg(r.now)+" kg":"vlastní váha"}</td>
+        <td>${r.change?signedNum(r.change)+" kg":(r.repsChange>0?signed(r.repsChange)+" op.":"0")}</td>
+        <td><span class="chip ${c}">${t}</span></td></tr>`;};
+    const head='<tr><th>Cvik</th><th>Teď</th><th>Změna</th><th>Stav</th></tr>';
+    const pozor=prog.filter(r=>r.state!=="roste"), rostou=prog.filter(r=>r.state==="roste");
+    out.push(`<h2 class="sec">Co se hýbe a co stojí</h2><div class="item">
+      ${pozor.length?`<table class="grid">${head}${pozor.map(row).join("")}</table>`
+        :`<p class="hint" style="margin:0">Žádný cvik nestojí na místě. Všech ${rostou.length} jde nahoru.</p>`}
+      ${rostou.length?`<details><summary>${rostou.length} ${rostou.length<5?"cviky rostou":"cviků roste"} podle plánu</summary>
+        <table class="grid">${head}${rostou.map(row).join("")}</table></details>`:""}
+      <p class="hint" style="margin-top:9px">Stagnuje = tři a víc tréninků po sobě bez přidání váhy i bez přidání opakování. Tam se vyplatí sáhnout po změně: jiný rozsah opakování, víc pauzy, nebo cvik vyměnit.</p></div>`);
+  }
+
+  /* ---------- 4. objem po týdnech ---------- */
+  const wk=ST.weeklyVolume(all,12);
+  if(wk.length>=2){
+    const bars=wk.map(w=>({label:dm(w.week),v:Math.round(w.volume),mark:w.deload,
+      tip:`týden od ${dm(w.week)}: ${kg(w.volume)} kg, ${w.sets} sérií${w.deload?", lehký":""}${w.n?"":", bez tréninku"}`}));
+    const jump=ST.biggestJump(wk);
+    out.push(`<h2 class="sec">Objem po týdnech</h2><div class="chart">
+      ${columnChart(bars,{unit:"kg"})}
+      <p class="hint" style="margin-top:6px"><span class="key"></span> lehký týden · objem = váha × opakování</p>
+      ${jump&&jump.pct>30?`<p class="hint" style="color:var(--red)">Největší skok mezi týdny: ${signed(jump.pct)} %, z týdne od ${dm(jump.from.week)} na ${dm(jump.to.week)} Skoky nad třetinu bývají příčinou podrážděných kloubů.</p>`:""}
+      <details><summary>Tabulka</summary><table>${wk.map(w=>`<tr><td>od ${dm(w.week)}${w.deload?" · lehký":""}</td><td>${kg(w.volume)} kg · ${w.sets} sérií</td></tr>`).join("")}</table></details></div>`);
+  }
+
+  /* ---------- 5. série po svalových skupinách ---------- */
+  const gNow=ST.groupSets(cur,planOf), gPrev=ST.groupSets(prev,planOf);
+  const gKeys=[...new Set([...Object.keys(gNow),...Object.keys(gPrev)])];
+  if(gKeys.length){
+    const rows=gKeys.map(g=>({label:g,v:Math.round((gNow[g]||0)/curWeeks*10)/10,ref:Math.round((gPrev[g]||0)/CYCLE_WEEKS*10)/10,
+      tip:`${g}: ${num((gNow[g]||0)/curWeeks)} sérií týdně teď, ${num((gPrev[g]||0)/CYCLE_WEEKS)} v předchozích 4 týdnech`})).sort((x,y)=>y.v-x.v);
+    out.push(`<h2 class="sec">Série podle svalových skupin</h2><div class="chart">
+      ${hbarChart(rows,{unit:"sérií týdně"})}
+      <p class="hint" style="margin-top:6px">Sérií za týden. <span class="key ref"></span> svislá ryska = předchozí čtyři týdny. Počítají se odcvičené série, ne plánované. K zádům si připočti lezení.</p></div>`);
+  }
+
+  /* ---------- 6. zásoba a únava ---------- */
+  const rirPts=all.filter(s=>!s.deload&&ST.sessionMeanRir(s)!==null).slice(-16)
+    .map(s=>({t:s.date,v:ST.sessionMeanRir(s),tip:fmt(s.date)+" · "+s.day+": zásoba "+num(ST.sessionMeanRir(s))}));
+  if(rirPts.length>=4){
+    const h=Math.floor(rirPts.length/2);
+    const d1=ST.mean(rirPts.slice(0,h).map(p=>p.v)), d2=ST.mean(rirPts.slice(h).map(p=>p.v)), dd=d2-d1;
+    const verdict=dd<=-0.4?"Zásoba klesá. Buď jdeš nahoru s váhou, nebo se hromadí únava. Když váhy stojí a zásoba padá, uber."
+      :dd>=0.4?"Zásoba roste. Série jsou čím dál lehčí, je prostor přidat."
+      :"Zásoba drží. Zatížení odpovídá tomu, co zvládáš.";
+    out.push(`<h2 class="sec">Zásoba a únava</h2><div class="chart">
+      ${lineChart(rirPts,{xLabel:p=>dm(p.t),endLabel:false})}
+      <p class="hint" style="margin-top:6px">${verdict} Druhá polovina období proti první: ${signed(dd,1)} opakování.</p></div>`);
+  }
+
+  /* ---------- 7. vliv lezení a capoeiry ---------- */
+  const eff=ST.contextEffects(all,CTX);
+  if(eff.some(e=>e.n1>0)){
+    const say=(e)=>{
+      if(e.verdict==="malo-dat") return `zatím málo dat`;
+      if(e.verdict==="sum") return `nerozeznatelné od běžného kolísání`;
+      const smer=e.diff<0?"těžší":"lehčí";
+      return `${e.verdict==="zretelny"?"zřetelně":"spíš"} ${smer} o ${Math.abs(e.diff).toFixed(1).replace(".",",")} opakování`;
+    };
+    out.push(`<h2 class="sec">Co ti bere lezení a capoeira</h2><div class="item"><table class="grid">
+      <tr><th>Předtím</th><th>Tréninků</th><th>Jak to vyšlo</th></tr>
+      ${eff.map(e=>`<tr><td>${esc(e.label)}</td><td>${e.n1} z ${e.n1+e.n2}</td><td class="wrap">${say(e)}</td></tr>`).join("")}
+    </table>
+    <p class="hint" style="margin-top:9px">Porovnává se průměrná zásoba opakování v tréninku. Nižší zásoba znamená, že série byly těžší. Rozdíl se vysloví, teprve když přesáhne kolísání mezi tréninky, a k tomu je potřeba aspoň čtyři tréninky v každé skupině.</p></div>`);
+  }
+
+  /* ---------- 8. docházka ---------- */
+  const rh=ST.rhythm(all);
+  if(rh.medianGap!==null){
+    const dows=["Po","Út","St","Čt","Pá","So","Ne"];
+    const rows=rh.byDow.map((n,i)=>({label:dows[i],v:n,tip:dows[i]+": "+n+" tréninků"}));
+    out.push(`<h2 class="sec">Docházka</h2><div class="item"><table>
+      <tr><td>Obvyklá mezera mezi tréninky</td><td>${czDays(rh.medianGap)}</td></tr>
+      <tr><td>Nejdelší pauza</td><td>${czDays(rh.maxGap)}</td></tr>
+      <tr><td>Od posledního tréninku</td><td>${rh.sinceLast===0?"dnes":"před "+czDays(rh.sinceLast)}</td></tr>
+    </table></div>
+    <div class="chart">${hbarChart(rows,{unit:"tréninků",labelW:30})}
+    <p class="hint" style="margin-top:6px">Pravidelnost rozhoduje o výsledku víc než volba cviků. Tři tréninky rozložené po týdnu unese regenerace líp než tři za sebou.</p></div>`);
+  }
+
+  /* ---------- 9. rekordy ---------- */
+  const recs=ST.records(all,plan);
+  if(recs.length){
+    const days=(d)=>Math.round((Date.now()-new Date(d))/864e5);
+    out.push(`<h2 class="sec">Osobní rekordy</h2><div class="item"><table class="grid">
+      <tr><th>Cvik</th><th>Odhad maxima</th><th>Z čeho</th><th>Kdy</th></tr>
+      ${recs.map(r=>`<tr><td>${esc(r.name)}</td><td>${Math.round(r.v)} kg</td><td>${kg(r.w)}×${r.reps}</td>
+        <td>${fmt(r.date)}<br><span class="sub2">${days(r.date)===0?"dnes":"před "+days(r.date)+" dny"}</span></td></tr>`).join("")}
+    </table><p class="hint" style="margin-top:9px">Nejlepší odhad maxima ze všech zapsaných sérií mimo lehké týdny. Když je rekord starší než dva cykly, stojí za zvážení změna rozsahu opakování.</p></div>`);
+  }
+
+  v.innerHTML=out.join("");
+  attachTips(v);
 }
 
 /* ============ PLÁN ============ */

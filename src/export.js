@@ -1,6 +1,7 @@
 import { CTX } from "../shared/program.js";
 import { BUILTIN_PLAN, exerciseOf, weightKeys, PLAN_FORMAT } from "../shared/plan.js";
 import { CYCLE_WEEKS, cycleEnd } from "../shared/cycle.js";
+import * as ST from "../shared/stats.js";
 
 const fmtDate = (d) => new Date(d).toLocaleDateString("cs-CZ", { day: "numeric", month: "numeric", year: "numeric", timeZone: "Europe/Prague" });
 const csvCell = (v) => {
@@ -72,6 +73,53 @@ function peakSets(sessions) {
     }
   }
   return peaks;
+}
+
+const num1 = (v) => (Math.round(v * 10) / 10).toLocaleString("cs-CZ", { maximumFractionDigits: 1 });
+const sgn = (v) => (v > 0 ? "+" : v < 0 ? "−" : "") + num1(Math.abs(v));
+
+/**
+ * Hotové signály z dat, ať je nemusí Claude dopočítávat a ať se v rozboru
+ * neztratí. Stejné výpočty, jaké ukazuje záložka Progres.
+ */
+function digestSummary(state, sessions, L) {
+  if (sessions.length < 2) return [];
+  const plan = L.active, out = ["SOUHRN OBDOBÍ"];
+  const sum = ST.summary(sessions);
+  const dny = (new Date(sessions[sessions.length - 1].date) - new Date(sessions[0].date)) / 864e5 + 1;
+  const tydny = Math.max(1, dny / 7);
+  out.push(`  Tréninků: ${sum.n}${sum.deloads ? ` (z toho ${sum.deloads} ${plural(sum.deloads, "lehký", "lehké", "lehkých")})` : ""} · ${num1(sum.n / tydny)} týdně`);
+  out.push(`  Objem: ${Math.round(sum.volume).toLocaleString("cs-CZ")} kg · ${sum.sets} sérií`);
+  if (sum.meanRir !== null) out.push(`  Průměrná zásoba: ${num1(sum.meanRir)} opakování`);
+
+  const lifts = [];
+  for (const l of ST.trackedLifts(plan)) {
+    const pts = ST.liftSeries(sessions, l.day, l.id);
+    if (pts.length < 2) continue;
+    const tr = ST.slopePerDay(pts);
+    lifts.push(`    ${l.name}: ${Math.round(pts[pts.length - 1].v)} kg, ${tr ? sgn(tr.slope * 7) + " kg za týden" : "?"} (${pts.length} měření)`);
+  }
+  if (lifts.length) out.push("  Odhad maxima u sledovaných cviků:", ...lifts);
+
+  const prog = ST.exerciseProgress(sessions, plan, state.weights || {});
+  const stoji = prog.filter((r) => r.state === "stagnuje").map((r) => `${r.day} ${r.name} (${r.stale} tréninků beze změny)`);
+  const couva = prog.filter((r) => r.state === "couva").map((r) => `${r.day} ${r.name} (${sgn(r.change)} kg)`);
+  if (stoji.length) out.push("  Stojí na místě: " + stoji.join(", "));
+  if (couva.length) out.push("  Couvá: " + couva.join(", "));
+  if (!stoji.length && !couva.length) out.push("  Stojí na místě: nic, všechny cviky se hýbou");
+
+  const g = ST.groupSets(sessions, L.planOf);
+  const gl = Object.entries(g).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${num1(v / tydny)}`);
+  if (gl.length) out.push("  Sérií týdně po skupinách: " + gl.join(" · "));
+
+  const eff = ST.contextEffects(sessions, CTX).map((e) => {
+    if (e.verdict === "malo-dat") return `${e.label.toLowerCase()} málo dat (${e.n1} z ${e.n1 + e.n2})`;
+    if (e.verdict === "sum") return `${e.label.toLowerCase()} bez rozdílu (${e.n1} z ${e.n1 + e.n2})`;
+    return `${e.label.toLowerCase()} ${e.diff < 0 ? "těžší" : "lehčí"} o ${num1(Math.abs(e.diff))} op. (${e.n1} z ${e.n1 + e.n2})`;
+  });
+  if (eff.length) out.push("  Zásoba podle toho, co bylo předtím: " + eff.join(" · "));
+  out.push("  (Zásoba = kolik opakování zbývalo. Nižší číslo znamená těžší sérii. Lehké týdny se do síly a rekordů nepočítají.)");
+  return out;
 }
 
 /** Návod pro Clauda, jak poslat další plán, aby šel rovnou nahrát. */
@@ -170,6 +218,8 @@ export function toDigest(state, sessions) {
     lines.push("Váhy cviků, které v aktuálním plánu nejsou (z dřívějších cyklů):");
     for (const k of orphans) lines.push(line(k));
   }
+  const sm = digestSummary(state, sessions, L);
+  if (sm.length) { lines.push(""); lines.push(...sm); }
   lines.push("");
   lines.push("Prosím o rozbor a nový plán na další cyklus: kde progres stagnuje, kde přidávám moc rychle, jestli je vidět vliv lezení a capoeiry na výkon v posilovně, a jaké váhy a cviky nasadit do dalšího čtyřtýdenního cyklu.");
   lines.push("");
