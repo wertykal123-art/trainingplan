@@ -161,3 +161,63 @@ test("vliv okolností vrací počty a verdikt pro každou položku", () => {
   assert.equal(climb.verdict, "zretelny");
   assert.equal(eff.find((e) => e.key === "capo").verdict, "malo-dat");
 });
+
+/* ---------- tělesná váha ---------- */
+const wSes = (d, h, v, ctx = {}) => ({ date: D(2026, 9, d, h).toISOString(), day: "A", ctx, weight: v, ex: [lift("squat", 100, 5, 2)] });
+
+test("řada vážení bere jen tréninky se zapsanou váhou a řadí je", () => {
+  const list = [wSes(5, 7, 78.2), { ...wSes(1, 7, 0), weight: null }, wSes(1, 7, 78.0), { ...wSes(3, 7, 0), weight: undefined }];
+  const p = ST.bodyWeightSeries(list);
+  assert.equal(p.length, 2, "prázdná vážení se přeskočí");
+  assert.equal(p[0].v, 78.0, "seřazeno podle data");
+  assert.equal(p[0].hour, 7);
+});
+
+test("klouzavý průměr počítá jen z okna dozadu", () => {
+  const list = [wSes(1, 7, 80), wSes(2, 7, 78), wSes(20, 7, 76)];
+  const r = ST.rollingMean(list.map((s) => ({ t: s.date, v: s.weight })), 14);
+  assert.equal(r[0].avg, 80, "první bod je sám sebou");
+  assert.equal(r[1].avg, 79, "průměr dvou");
+  assert.equal(r[2].avg, 76, "starší než 14 dní už do okna nespadá");
+  assert.equal(r[2].n, 1);
+});
+
+test("tempo váhy mlčí, dokud není z čeho počítat", () => {
+  const malo = ST.bodyWeightTrend([1, 3, 5].map((d) => ({ t: D(2026, 9, d).toISOString(), v: 78 })));
+  assert.equal(malo.enough, false, "tři vážení na tempo nestačí");
+  const kratke = ST.bodyWeightTrend(Array.from({ length: 10 }, (_, i) => ({ t: D(2026, 9, 1 + i).toISOString(), v: 78 + i * 0.1 })));
+  assert.equal(kratke.enough, false, "deset vážení za devět dní je krátké okno");
+  const ok = ST.bodyWeightTrend(Array.from({ length: 10 }, (_, i) => ({ t: D(2026, 9, 1 + i * 2).toISOString(), v: 78 + i * 0.2 })));
+  assert.equal(ok.enough, true);
+  assert.equal(Math.round(ok.kgPerWeek * 100) / 100, 0.7, "0,2 kg za dva dny je 0,7 kg za týden");
+  assert.equal(ok.n, 10);
+});
+
+test("hlídání podmínek pozná rozházené i posouvající se hodiny", () => {
+  const stabilni = Array.from({ length: 8 }, (_, i) => ({ t: D(2026, 9, 1 + i * 2, 7).toISOString(), v: 78, hour: 7 + (i % 2) * 0.25 }));
+  assert.equal(ST.hourConsistency(stabilni).verdict, "ok");
+  const posun = Array.from({ length: 8 }, (_, i) => ({ t: D(2026, 9, 1 + i * 2).toISOString(), v: 78, hour: 7 + i * 0.4 }));
+  assert.equal(ST.hourConsistency(posun).verdict, "posouva");
+  const mix = Array.from({ length: 9 }, (_, i) => ({ t: D(2026, 9, 1 + i * 2).toISOString(), v: 78, hour: [7, 17, 20][i % 3] }));
+  assert.equal(ST.hourConsistency(mix).verdict, "rozhazene");
+  assert.equal(ST.hourConsistency([{ hour: 7 }, { hour: 8 }]).enough, false, "pod čtyři vážení se nic netvrdí");
+});
+
+test("váha se čte společně se silou", () => {
+  assert.equal(ST.weightStrengthVerdict(0.3, 2).key, "roste|roste");
+  assert.equal(ST.weightStrengthVerdict(0.3, 0).key, "roste|stoji");
+  assert.equal(ST.weightStrengthVerdict(-0.3, 2).key, "klesa|roste");
+  assert.equal(ST.weightStrengthVerdict(0.05, -2).key, "stoji|klesa", "pod desetinu kila týdně je váha stabilní");
+  assert.equal(ST.weightStrengthVerdict(null, 2), null);
+  assert.equal(ST.weightStrengthVerdict(0.3, null), null);
+});
+
+test("odskok váhy podle okolností se počítá z odchylky, ne z absolutní váhy", () => {
+  /* váha stoupá, ale po lezení je vždy o půl kila níž proti vlastnímu průměru */
+  const pts = Array.from({ length: 12 }, (_, i) => ({
+    t: D(2026, 9, 1 + i * 2).toISOString(), v: 78 + i * 0.1 - (i % 2 ? 0.5 : 0), ctx: { climb: i % 2 === 1 }, hour: 7 }));
+  const eff = ST.weightContextEffects(ST.rollingMean(pts, 14), [{ k: "climb", label: "Lezení" }]);
+  assert.ok(eff[0].diff < -0.2, "po lezení je váha níž");
+  assert.equal(eff[0].verdict, "zretelny");
+  assert.ok(eff[0].n1 >= 4 && eff[0].n2 >= 4);
+});

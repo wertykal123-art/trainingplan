@@ -39,7 +39,7 @@ function lookup(state) {
 /** CSV: jedna řádka = jedna série. Vhodné pro tabulky i pro hlubší analýzu. */
 export function toCSV(state, sessions) {
   const L = lookup(state);
-  const head = ["datum", "cas", "plan", "trenink", "lehky_tyden", "cvik_id", "cvik", "serie", "vaha_kg", "opakovani", "zasoba_rir", "objem_kg", "lezeni_predtim", "capoeira_predtim", "nevyspaly"];
+  const head = ["datum", "cas", "plan", "trenink", "lehky_tyden", "cvik_id", "cvik", "serie", "vaha_kg", "opakovani", "zasoba_rir", "objem_kg", "lezeni_predtim", "capoeira_predtim", "nevyspaly", "telesna_vaha_kg"];
   const rows = [head.join(",")];
   for (const s of sessions) {
     const d = new Date(s.date);
@@ -51,7 +51,8 @@ export function toCSV(state, sessions) {
       (e.sets || []).forEach((set, i) => {
         const w = Number(set.w ?? e.w ?? 0), reps = Number(set.reps || 0);
         rows.push([date, time, planName, s.day, s.deload ? 1 : 0, e.id, L.name(s, e.id), i + 1, w, reps, set.rir ?? "", Math.round(w * reps * 100) / 100,
-          ctx.climb ? 1 : 0, ctx.capo ? 1 : 0, ctx.tired ? 1 : 0].map(csvCell).join(","));
+          ctx.climb ? 1 : 0, ctx.capo ? 1 : 0, ctx.tired ? 1 : 0,
+          typeof s.weight === "number" ? s.weight : ""].map(csvCell).join(","));
       });
     }
   }
@@ -111,6 +112,20 @@ function digestSummary(state, sessions, L) {
   const g = ST.groupSets(sessions, L.planOf);
   const gl = Object.entries(g).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${num1(v / tydny)}`);
   if (gl.length) out.push("  Sérií týdně po skupinách: " + gl.join(" · "));
+
+  const wp = ST.bodyWeightSeries(sessions);
+  if (wp.length >= 2) {
+    const roll = ST.rollingMean(wp, 14), tr = ST.bodyWeightTrend(wp), hc = ST.hourConsistency(wp);
+    out.push(`  Tělesná váha: ${num1(roll[roll.length - 1].avg)} kg (průměr za 14 dní, poslední vážení ${num1(wp[wp.length - 1].v)} kg)`);
+    out.push(`    ${tr.enough ? `Tempo ${sgn(tr.kgPerWeek)} kg za týden z ${tr.n} vážení za ${tr.span} dní.` : `Na tempo zatím málo dat: ${tr.n} vážení za ${tr.span} dní.`}`);
+    if (hc.enough) {
+      const hh = (h) => Math.floor(h) + ":" + String(Math.round((h % 1) * 60)).padStart(2, "0");
+      const span = (h) => (h < 1 ? Math.round(h * 60) + " minut" : num1(h) + " h");
+      out.push(`    Podmínky vážení: ${hc.verdict === "rozhazene" ? `rozhozené, polovina měření se rozchází o ${span(hc.iqr)}, trend je tím pádem nespolehlivý`
+        : hc.verdict === "posouva" ? `hodina se posouvá o ${span(Math.abs(hc.driftPer4w))} za čtyři týdny, trend to ohýbá`
+        : `stabilní, obvykle kolem ${hh(hc.median)}`}.`);
+    }
+  }
 
   const eff = ST.contextEffects(sessions, CTX).map((e) => {
     if (e.verdict === "malo-dat") return `${e.label.toLowerCase()} málo dat (${e.n1} z ${e.n1 + e.n2})`;

@@ -22,7 +22,7 @@ const fmtNum = (v) => (Math.abs(v) >= 1000 ? Math.round(v) : Math.round(v * 10) 
 export function lineChart(points, { unit = "", height = 128, xLabel = (p) => "", endLabel = true } = {}) {
   if (points.length < 2) return "";
   const H = height, padR = 14, padT = 12, axis = 22, padB = axis + 12;
-  const vs = points.map((p) => p.v);
+  const vs = points.flatMap((p) => (typeof p.raw === "number" ? [p.v, p.raw] : [p.v]));
   let mn = Math.min(...vs), mx = Math.max(...vs);
   const step = niceStep((mx - mn) || Math.max(1, mx * 0.1));
   mn = Math.floor(mn / step) * step - (mx === mn ? step : 0);
@@ -43,8 +43,10 @@ export function lineChart(points, { unit = "", height = 128, xLabel = (p) => "",
   }).join("");
   return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" role="img" aria-label="vývoj v čase">
     ${grid.join("")}
+    ${points.map((p, i) => (typeof p.raw === "number" ? `<circle class="ch-raw" cx="${x(i).toFixed(1)}" cy="${y(p.raw).toFixed(1)}" r="2.5"/>` : "")).join("")}
     <polyline class="ch-line" points="${points.map((p, i) => x(i).toFixed(1) + "," + y(p.v).toFixed(1)).join(" ")}"/>
-    ${points.map((p, i) => `<circle class="ch-dot" cx="${x(i).toFixed(1)}" cy="${y(p.v).toFixed(1)}" r="${i === points.length - 1 ? 4.5 : 3}"/>`).join("")}
+    ${points.map((p, i) => (i === points.length - 1 || points.length <= 14
+      ? `<circle class="ch-dot" cx="${x(i).toFixed(1)}" cy="${y(p.v).toFixed(1)}" r="${i === points.length - 1 ? 4.5 : 3}"/>` : "")).join("")}
     ${endLabel ? `<text class="ch-val" x="${(W - padR - 14).toFixed(1)}" y="${(y(last.v) < padT + 22 ? y(last.v) + 18 : y(last.v) - 12).toFixed(1)}" text-anchor="end">${fmtNum(last.v)}${unit ? " " + unit : ""}</text>` : ""}
     <text class="ch-txt" x="${padL}" y="${H - 6}">${esc(xLabel(points[0]))}</text>
     <text class="ch-txt" x="${W - padR}" y="${H - 6}" text-anchor="end">${esc(xLabel(last))}</text>

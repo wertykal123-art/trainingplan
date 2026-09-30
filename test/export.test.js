@@ -20,7 +20,7 @@ test("CSV má hlavičku a řádek na každou sérii", () => {
   const lines = csv.replace(/^﻿/, "").trim().split("\r\n");
   assert.equal(lines.length, 1 + 4);
   assert.ok(lines[0].startsWith("datum,cas,plan,trenink,lehky_tyden,cvik_id,cvik,serie,vaha_kg"));
-  assert.equal(lines[1], "2026-08-10,08:00," + BUILTIN_PLAN.name + ",A,0,squat,Dřep s velkou činkou,1,80,6,2,480,1,0,0");
+  assert.equal(lines[1], "2026-08-10,08:00," + BUILTIN_PLAN.name + ",A,0,squat,Dřep s velkou činkou,1,80,6,2,480,1,0,0,");
   assert.ok(lines[4].includes('"Mrtvý tah (trhačky / trap bar)"') || lines[4].includes("Mrtvý tah (trhačky / trap bar)"));
 });
 

@@ -279,3 +279,79 @@ export function contextEffects(sessions, ctxList) {
     return { key: c.k, label: c.label, ...welch(on, off) };
   });
 }
+
+/* ---------- tělesná váha ----------
+   Jednotlivé vážení je skoro bezcenné: denní kolísání vody, glykogenu a obsahu
+   střev dělá 1 až 2 kg, zatímco skutečná změna je nanejvýš půl kila za týden.
+   Proto se všude pracuje s klouzavým průměrem a trend se vysloví, teprve když
+   je z čeho. Lehké týdny se nevynechávají, na váhu nemají vliv. */
+
+const hourOf = (d) => { const x = new Date(d); return x.getHours() + x.getMinutes() / 60; };
+
+export function bodyWeightSeries(sessions) {
+  return sessions
+    .filter((s) => typeof s.weight === "number" && s.weight > 0)
+    .map((s) => ({ t: s.date, v: s.weight, ctx: s.ctx || {}, hour: hourOf(s.date), day: s.day }))
+    .sort((a, b) => new Date(a.t) - new Date(b.t));
+}
+
+/** Ke každému vážení průměr za předchozích `days` dní včetně. To je ta čára, která se čte. */
+export function rollingMean(points, days = 14) {
+  return points.map((p, i) => {
+    const to = +new Date(p.t), from = to - days * DAY_MS;
+    const win = points.slice(0, i + 1).filter((q) => +new Date(q.t) >= from);
+    return { ...p, avg: mean(win.map((q) => q.v)), n: win.length };
+  });
+}
+
+/**
+ * Tempo změny váhy v kg za týden. Pod minimem vážení nebo na krátkém úseku
+ * se vrací enough:false, aby se z šumu nedělal závěr.
+ */
+export function bodyWeightTrend(points, { days = 28, minPoints = 8, minSpanDays = 14 } = {}) {
+  if (points.length < 2) return { enough: false, n: points.length, span: 0 };
+  const last = +new Date(points[points.length - 1].t);
+  const win = points.filter((p) => +new Date(p.t) >= last - days * DAY_MS);
+  const span = win.length ? Math.round((last - +new Date(win[0].t)) / DAY_MS) : 0;
+  if (win.length < minPoints || span < minSpanDays) return { enough: false, n: win.length, span };
+  const tr = slopePerDay(win);
+  if (!tr) return { enough: false, n: win.length, span };
+  return { enough: true, kgPerWeek: tr.slope * 7, r2: tr.r2, n: win.length, span };
+}
+
+/**
+ * Jak stabilní jsou podmínky vážení. Náhodný rozptyl se v průměru vyruší,
+ * ale systematický posun hodiny trend padělá, a na ten je potřeba upozornit.
+ */
+export function hourConsistency(points) {
+  if (points.length < 4) return { enough: false, n: points.length };
+  const hs = points.map((p) => p.hour).sort((a, b) => a - b);
+  const q = (f) => { const i = (hs.length - 1) * f, lo = Math.floor(i), hi = Math.ceil(i); return hs[lo] + (hs[hi] - hs[lo]) * (i - lo); };
+  const iqr = q(0.75) - q(0.25);
+  const drift = slopePerDay(points.map((p) => ({ t: p.t, v: p.hour })));
+  const per4w = drift ? drift.slope * 28 : 0;
+  const verdict = iqr > 2.5 ? "rozhazene" : Math.abs(per4w) >= 1 ? "posouva" : "ok";
+  return { enough: true, n: points.length, median: q(0.5), iqr, driftPer4w: per4w, verdict };
+}
+
+/** Váha sama o sobě nic neříká. Teprve spolu se silou z toho je rozhodnutí. */
+export function weightStrengthVerdict(kgPerWeek, strengthPct) {
+  if (typeof kgPerWeek !== "number" || typeof strengthPct !== "number") return null;
+  const w = kgPerWeek > 0.1 ? "roste" : kgPerWeek < -0.1 ? "klesa" : "stoji";
+  const s = strengthPct > 0.5 ? "roste" : strengthPct < -0.5 ? "klesa" : "stoji";
+  return { w, s, key: w + "|" + s };
+}
+
+/**
+ * O kolik se vážení liší od vlastního klouzavého průměru podle toho, co bylo
+ * předtím. Pracuje se s odchylkou, ne s absolutní váhou, jinak by výsledek
+ * ovlivnil dlouhodobý trend.
+ */
+export function weightContextEffects(rolled, ctxList) {
+  const dev = rolled.filter((p) => p.n >= 3).map((p) => ({ ...p, d: p.v - p.avg }));
+  return ctxList.map((c) => {
+    const on = dev.filter((p) => p.ctx && p.ctx[c.k]).map((p) => p.d);
+    const off = dev.filter((p) => !(p.ctx && p.ctx[c.k])).map((p) => p.d);
+    return { key: c.k, label: c.label, ...welch(on, off) };
+  });
+}

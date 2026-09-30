@@ -9,7 +9,8 @@ klepnutím vyexportuješ historii pro rozbor v Claudovi.
 - **Trénink** – zápis sérií (váha × opakování × zásoba), pauzy, automatická progrese vah
 - **Historie / Progres** – odcvičené tréninky a devět pohledů na to, jak trénink jde
 - **Plán** – celý program s pokyny ke cvikům
-- **Data** – export TXT (rozbor pro Clauda), CSV (řádek na sérii), JSON (záloha), import zálohy
+- **Data** – nastavení, export TXT (rozbor pro Clauda), CSV (řádek na sérii), JSON (záloha), import zálohy
+- **Vážení** – nepovinné, zapíná se v nastavení. Váha před tréninkem, v Progresu graf s klouzavým průměrem
 - **Přihlášení** – jedno heslo, cookie na 90 dní, ochrana proti hádání hesla
 - **Offline** – aplikace se otevře i bez signálu, změny se uloží na server po připojení
 
@@ -43,6 +44,7 @@ Tabulky si server vytvoří sám při startu. Bez `APP_PASSWORD` nebo `DATABASE_
 | Zásoba a únava | Vývoj průměrné zásoby opakování a slovní výklad, jestli přituhuje. |
 | Co ti bere lezení a capoeira | Srovnání zásoby podle toho, co bylo v posledních 48 hodinách. |
 | Docházka | Obvyklá mezera mezi tréninky, nejdelší pauza, rozložení po dnech. |
+| Tělesná váha | Jen se zapnutým vážením. Klouzavý průměr za 14 dní, tempo v kg za týden a výklad spolu se silou. |
 | Osobní rekordy | Nejlepší odhad maxima u sledovaných cviků a jak je starý. |
 
 Statistiky jsou schválně opatrné:
@@ -57,6 +59,23 @@ Statistiky jsou schválně opatrné:
 
 Stejný souhrn jde i do textového exportu, takže Claude dostane hotové signály
 (co stagnuje, jaké je tempo síly, co dělá lezení) a nemusí je dopočítávat.
+
+## Vážení před tréninkem
+
+Vypnuté. Zapíná se v záložce **Data → Nastavení**, protože má smysl jen tehdy,
+když se vážíš pokaždé za podobných podmínek.
+
+Jednotlivé vážení kolísá o kilo až dvě podle vody, glykogenu a obsahu střev,
+zatímco skutečná změna je nanejvýš půl kila za týden. Deník proto nikde
+neukazuje holé číslo jako novinku:
+
+- Graf kreslí jednotlivá vážení jako světlé body a klouzavý průměr za 14 dní jako čáru. Čte se čára.
+- Tempo v kg za týden se vysloví od osmi vážení rozložených aspoň do dvou týdnů. Pod tím napíše, že je málo dat.
+- Deník si hlídá hodinu tréninků. Když se rozcházejí nebo se systematicky posouvají, upozorní, že trend ohýbá rozvrh, ne tělo, a doporučí vážit se ráno po probuzení.
+- Odskok od vlastního průměru po lezení nebo capoeiře se počítá z odchylky, ne z absolutní váhy, takže do něj nemluví dlouhodobý trend.
+- Váha se vykládá společně se silou. Samotné číslo nerozliší sval od tuku, dvojice váha a odhad maxima ano.
+
+Vypnutí přepínače jen schová pole a graf. Zapsaná vážení zůstávají v databázi i v exportu.
 
 ## Měsíční cyklus a lehký týden
 
@@ -153,7 +172,7 @@ npm test                  # jednotkové testy statistik, plánu, cyklu, exportu 
 
 ```
 src/server.js     Express server, API, statické soubory
-src/db.js         Postgres – tabulky sessions (tréninky), plans (nahrané plány) a kv (váhy, cyklus, rozpracovaný trénink)
+src/db.js         Postgres – tabulky sessions (tréninky, tělesná váha), plans (nahrané plány) a kv (váhy, cyklus, nastavení)
 src/auth.js       heslo, podepsaná cookie, limit pokusů
 src/export.js     TXT / CSV / JSON export
 shared/program.js tréninkový program (sdílený s prohlížečem)

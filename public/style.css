@@ -166,3 +166,10 @@ table.grid td:not(:first-child){white-space:nowrap}
 table.grid td.wrap{white-space:normal}
 .item details{border-top:1px solid var(--line);margin-top:6px}
 .item details summary{font-family:var(--body);font-size:12px;font-weight:500;text-transform:none;letter-spacing:0;color:var(--steel)}
+.ch-raw{fill:var(--blue);opacity:.3}
+.setrow{display:flex;align-items:flex-start;gap:10px}
+.setrow b{display:block;font-weight:600}
+.setrow .sub2{display:block;margin-top:2px}
+.toggle{flex:0 0 auto;margin-left:auto;border:1px solid var(--line);background:#fff;border-radius:3px;padding:7px 11px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--steel);cursor:pointer;white-space:nowrap}
+.toggle[aria-pressed="true"]{background:var(--green);border-color:var(--green);color:#fff;font-weight:600}
+.key.raw{width:6px;height:6px;border-radius:50%;background:var(--blue);opacity:.35}
